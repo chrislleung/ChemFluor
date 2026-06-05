@@ -1,0 +1,14 @@
+numpy
+pandas
+scikit-learn
+lightgbm
+rdkit
+matplotlib
+scipy
+
+# Optional, skipped gracefully when unavailable
+xgboost
+catboost
+optuna
+shap
+

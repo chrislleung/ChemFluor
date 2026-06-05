@@ -1,0 +1,36 @@
+@"
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Outputs and logs
+outputs/
+logs/
+*.out
+*.err
+
+# Generated ML/model files
+*.pkl
+*.joblib
+*.pt
+*.pth
+*.h5
+*.onnx
+
+# Environment/secrets
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+"@ | Set-Content .gitignore
