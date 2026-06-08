@@ -412,7 +412,7 @@ ssh <your_username>@nibi.alliancecan.ca
 Example:
 
 ```bash
-ssh chrisl@nibi.alliancecan.ca
+ssh johndoe@nibi.alliancecan.ca
 ```
 
 ### 2. Go to the Project Folder
