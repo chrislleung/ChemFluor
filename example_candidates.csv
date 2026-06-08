@@ -1,0 +1,4 @@
+name,SMILES,solvent
+benzene_example,c1ccccc1,MeCN
+ethanol_example,CCO,MeOH
+triethylamine_example,CCN(CC)CC,MeCN
