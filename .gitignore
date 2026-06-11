@@ -1,32 +1,102 @@
+# =========================
 # Python
+# =========================
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
+# =========================
 # Virtual environments
+# =========================
 .venv/
 venv/
 env/
 chemfluor_env/
+.conda/
 
-# Private data
-chemfluor_data.csv
-
-# Generated outputs/models
-outputs/
-*.pkl
-*.joblib
-
+# =========================
 # Jupyter
+# =========================
 .ipynb_checkpoints/
 
-# Slurm / logs
-*.out
-*.err
-*.log
-
-# OS/editor
+# =========================
+# OS / editor
+# =========================
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+
+# =========================
+# Slurm / logs
+# =========================
+*.out
+*.err
+*.log
+slurm-*.out
+
+# =========================
+# Model artifacts
+# =========================
+# Trained models can be large and should not be committed.
+*.joblib
+*.pkl
+*.pickle
+models/**/*.joblib
+models/**/*.pkl
+models/**/*.pickle
+
+# Keep model folders out by default unless explicitly whitelisted.
+models/chemfluor_combined/
+models/chemfluor_combined_histgb/
+
+# =========================
+# Generated outputs
+# =========================
+outputs/
+reports/
+figures/
+
+# =========================
+# Generated intermediate data
+# =========================
+# These are reproducible from scripts and can be large.
+models/**/predictions_*.csv
+models/**/metrics.json
+models/**/feature_metadata.json
+models/**/combined_standardized_training_rows.csv
+models/**/combined_modeling_rows_after_feature_merge.csv
+
+# Candidate-screening outputs are generated and reproducible.
+data/generated_candidates/
+outputs/candidate_screening/
+
+# =========================
+# Raw/private data
+# =========================
+# Keep private/raw local data out of GitHub unless intentionally sanitized.
+data/raw/
+#chemfluor_data.csv
+
+# =========================
+# Large spreadsheet/raw source files
+# =========================
+*.xlsx
+*.xls
+*.xlsm
+
+# =========================
+# Optional: allow sanitized data files
+# =========================
+# If you want to commit a sanitized combined dataset, place it under:
+# data/processed/
+# and make sure it is not too large for GitHub.
+!data/
+!data/processed/
+!data/processed/*.csv
+!data/README.md

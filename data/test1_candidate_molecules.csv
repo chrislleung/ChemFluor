@@ -1,0 +1,7 @@
+name,smiles
+coumarin,O=c1oc2ccccc2cc1
+7-hydroxycoumarin,O=c1oc2cc(O)ccc2cc1
+umbelliferone,O=c1oc2ccc(O)cc2cc1
+fluorescein,O=C1OC2(c3ccc(O)cc3Oc3cc(O)ccc32)c2ccccc21
+anthracene,c1ccc2cc3ccccc3cc2c1
+pyrene,c1cc2ccc3cccc4ccc(c1)c2c34
