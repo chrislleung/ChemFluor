@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import joblib
 import numpy as np
@@ -35,6 +35,8 @@ else:
 DEFAULT_MODEL_DIR = Path("models/chemfluor_combined")
 DEFAULT_SOLVENT_DESCRIPTORS = Path("data/solvent_descriptors_expanded_deep4chem_chatgpt.csv")
 DEFAULT_OUT = Path("outputs/candidate_screening/ranked_candidates.csv")
+DEFAULT_APPLICABILITY_REFERENCE = "combined_modeling_rows_after_feature_merge.csv"
+DEFAULT_APPLICABILITY_THRESHOLD = 0.30
 
 REQUIRED_TARGETS = ["emission_nm", "absorption_nm", "quantum_yield"]
 OPTIONAL_TARGETS = ["log_extinction"]
@@ -53,11 +55,21 @@ CORE_OUTPUT_COLUMNS = [
     "predicted_emission_nm",
     "predicted_quantum_yield",
     "predicted_log_extinction",
+    "nearest_training_similarity",
+    "nearest_training_smiles",
+    "outside_applicability_domain",
     "emission_error_from_target",
     "score",
     "estimated_brightness_score",
 ]
 INTERNAL_TEMPORARY_COLUMNS = set()
+REFERENCE_SMILES_COLUMNS = [
+    "canonical_chromophore_smiles",
+    "chromophore_smiles",
+    "canonical_smiles",
+    "smiles",
+]
+CANDIDATE_APPLICABILITY_SMILES_COLUMNS = ["canonical_smiles", "smiles"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,6 +98,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--solvent-descriptors", default=DEFAULT_SOLVENT_DESCRIPTORS, type=Path
     )
+    parser.add_argument(
+        "--applicability-reference-csv",
+        type=Path,
+        default=None,
+        help=(
+            "CSV containing reference training/modeling chromophore SMILES. "
+            "Defaults to <model-dir>/combined_modeling_rows_after_feature_merge.csv "
+            "when available."
+        ),
+    )
+    parser.add_argument(
+        "--applicability-threshold",
+        default=DEFAULT_APPLICABILITY_THRESHOLD,
+        type=float,
+        help="Tanimoto similarity threshold below which candidates are flagged.",
+    )
+    parser.add_argument(
+        "--no-applicability-domain",
+        action="store_true",
+        help="Disable Morgan fingerprint Tanimoto applicability-domain scoring.",
+    )
     parser.add_argument("--out", default=DEFAULT_OUT, type=Path)
     return parser.parse_args()
 
@@ -103,12 +136,17 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def find_smiles_column(df: pd.DataFrame) -> str:
-    """Find a smiles column in a candidate CSV."""
-    for column in df.columns:
-        if str(column).strip().lower() == "smiles":
+def find_smiles_column(df: pd.DataFrame, candidates: Sequence[str] | None = None) -> str:
+    """Find a SMILES column using a priority-ordered list of candidate names."""
+    candidate_names = list(candidates) if candidates is not None else ["smiles"]
+    normalized_columns = {str(column).strip().lower(): column for column in df.columns}
+    for candidate in candidate_names:
+        column = normalized_columns.get(candidate.lower())
+        if column is not None:
             return column
-    raise ValueError("Candidate CSV must contain a column named 'smiles'.")
+    raise ValueError(
+        "CSV must contain one of these SMILES columns: " + ", ".join(candidate_names)
+    )
 
 
 def load_candidates(path: Path) -> pd.DataFrame:
@@ -174,6 +212,175 @@ def build_fingerprints(canonical_smiles: pd.Series, radius: int, n_bits: int) ->
     if any(fingerprint is None for fingerprint in fingerprints):
         raise ValueError("A canonical candidate SMILES failed RDKit fingerprinting.")
     return np.vstack(fingerprints)
+
+
+def morgan_bitvect(smiles: str, radius: int, n_bits: int) -> Any | None:
+    """Generate an RDKit Morgan fingerprint bit vector for Tanimoto similarity."""
+    require_rdkit()
+    canonical = canonicalize_smiles(str(smiles))
+    if canonical is None:
+        return None
+    mol = Chem.MolFromSmiles(canonical)
+    if mol is None:
+        return None
+    return AllChem.GetMorganFingerprintAsBitVect(mol, radius=radius, nBits=n_bits)
+
+
+def infer_applicability_reference(model_dir: Path) -> Path | None:
+    """Infer the default applicability-reference CSV from the model directory."""
+    reference_path = model_dir / DEFAULT_APPLICABILITY_REFERENCE
+    if reference_path.exists():
+        return reference_path
+    return None
+
+
+def load_reference_fingerprints(
+    reference_csv: Path,
+    radius: int,
+    n_bits: int,
+) -> tuple[list[Any], list[str]]:
+    """Load, canonicalize, deduplicate, and fingerprint reference chromophores."""
+    if not reference_csv.exists():
+        raise FileNotFoundError(f"Applicability reference CSV not found: {reference_csv}")
+
+    reference_rows = pd.read_csv(reference_csv, low_memory=False)
+    smiles_column = find_smiles_column(reference_rows, REFERENCE_SMILES_COLUMNS)
+    canonical_smiles = (
+        reference_rows[smiles_column]
+        .dropna()
+        .astype(str)
+        .map(canonicalize_smiles)
+        .dropna()
+        .drop_duplicates()
+        .sort_values()
+        .tolist()
+    )
+
+    reference_fps: list[Any] = []
+    reference_smiles: list[str] = []
+    for smiles in canonical_smiles:
+        fingerprint = morgan_bitvect(smiles, radius=radius, n_bits=n_bits)
+        if fingerprint is None:
+            continue
+        reference_fps.append(fingerprint)
+        reference_smiles.append(smiles)
+
+    if not reference_fps:
+        raise ValueError(
+            f"No valid reference chromophore fingerprints found in {reference_csv}"
+        )
+    return reference_fps, reference_smiles
+
+
+def compute_nearest_training_similarity(
+    candidate_smiles: object,
+    reference_fps: Sequence[Any],
+    reference_smiles: Sequence[str],
+    radius: int,
+    n_bits: int,
+) -> tuple[float, str]:
+    """Find the nearest reference chromophore by Morgan Tanimoto similarity."""
+    if pd.isna(candidate_smiles):
+        return float("nan"), ""
+
+    candidate_fp = morgan_bitvect(str(candidate_smiles), radius=radius, n_bits=n_bits)
+    if candidate_fp is None:
+        return float("nan"), ""
+
+    similarities = DataStructs.BulkTanimotoSimilarity(candidate_fp, list(reference_fps))
+    if not similarities:
+        return float("nan"), ""
+
+    best_index = max(range(len(similarities)), key=lambda index: similarities[index])
+    return float(similarities[best_index]), reference_smiles[best_index]
+
+
+def add_applicability_domain_columns(
+    df: pd.DataFrame,
+    reference_csv: Path,
+    threshold: float,
+    radius: int = 2,
+    n_bits: int = 2048,
+) -> pd.DataFrame:
+    """Add nearest-reference Morgan Tanimoto applicability-domain columns."""
+    smiles_column = find_smiles_column(df, CANDIDATE_APPLICABILITY_SMILES_COLUMNS)
+    reference_fps, reference_smiles = load_reference_fingerprints(
+        reference_csv=reference_csv,
+        radius=radius,
+        n_bits=n_bits,
+    )
+
+    nearest = [
+        compute_nearest_training_similarity(
+            candidate_smiles=smiles,
+            reference_fps=reference_fps,
+            reference_smiles=reference_smiles,
+            radius=radius,
+            n_bits=n_bits,
+        )
+        for smiles in df[smiles_column]
+    ]
+
+    output = df.copy()
+    output["nearest_training_similarity"] = [value[0] for value in nearest]
+    output["nearest_training_smiles"] = [value[1] for value in nearest]
+    output["outside_applicability_domain"] = (
+        output["nearest_training_similarity"].isna()
+        | (output["nearest_training_similarity"] < threshold)
+    )
+    return output
+
+
+def maybe_add_applicability_domain_columns(
+    df: pd.DataFrame,
+    model_dir: Path,
+    reference_csv: Path | None,
+    threshold: float,
+    metadata: dict[str, Any],
+    disabled: bool,
+) -> pd.DataFrame:
+    """Add applicability columns when a reference CSV is available."""
+    if disabled:
+        print("Applicability-domain scoring disabled.")
+        return df
+    if threshold < 0 or threshold > 1:
+        raise ValueError(
+            f"Applicability threshold must be between 0 and 1, got {threshold}."
+        )
+
+    selected_reference = reference_csv or infer_applicability_reference(model_dir)
+    if selected_reference is None:
+        print(
+            "WARNING: no applicability reference CSV found; continuing without "
+            "applicability-domain columns."
+        )
+        return df
+    if not selected_reference.exists():
+        print(
+            "WARNING: applicability reference CSV not found: "
+            f"{selected_reference}; continuing without applicability-domain columns."
+        )
+        return df
+
+    # The current training script saves all post-feature-merge modeling rows but does
+    # not persist per-row train/test membership. Until that split membership is saved,
+    # this reference set may include both train and held-out chromophores.
+    radius = int(metadata.get("fingerprint_radius", 2))
+    n_bits = int(metadata.get("fingerprint_n_bits", 2048))
+    output = add_applicability_domain_columns(
+        df=df,
+        reference_csv=selected_reference,
+        threshold=threshold,
+        radius=radius,
+        n_bits=n_bits,
+    )
+    outside_count = int(output["outside_applicability_domain"].sum())
+    print(
+        "Added applicability-domain scores using "
+        f"{selected_reference} at threshold {threshold:.2f}; "
+        f"{outside_count} candidate(s) flagged outside domain."
+    )
+    return output
 
 
 def canonicalize_solvent(solvent_smiles: str) -> str:
@@ -359,6 +566,14 @@ def main() -> int:
             models=models,
             metadata=metadata,
             solvent_descriptor_row=solvent_row,
+        )
+        predictions = maybe_add_applicability_domain_columns(
+            df=predictions,
+            model_dir=args.model_dir,
+            reference_csv=args.applicability_reference_csv,
+            threshold=args.applicability_threshold,
+            metadata=metadata,
+            disabled=args.no_applicability_domain,
         )
         ranked = rank_candidates(
             predictions=predictions,

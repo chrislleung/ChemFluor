@@ -77,6 +77,10 @@ ChemFluor_Project/
   run_chemfluor.sh
   example_candidates.csv
   solvent_descriptors.csv
+  scripts/
+    generate_scaffold_candidates.py
+    screen_candidate_molecules.py
+    summarize_candidate_screening.py
   src/
     __init__.py
     config.py
@@ -103,6 +107,11 @@ ChemFluor_Project/
     plots/
     models/
     predictions/
+    candidate_screening/
+  tests/
+    test_applicability_domain.py
+    test_data_standardization.py
+    test_summarize_candidate_screening.py
 ```
 
 ---
@@ -899,6 +908,7 @@ The complete command-line workflow is:
 6. Analyze prediction errors
 7. Generate scaffold-based candidate molecules
 8. Screen candidates for target emission wavelengths
+9. Summarize candidate screening results
 ```
 
 Generated model files, prediction outputs, plots, and reports should remain local and should not be committed to GitHub.
@@ -1187,6 +1197,24 @@ predicted_log_extinction
 
 and ranks candidates using a score that rewards closeness to the target emission wavelength and higher predicted quantum yield.
 
+The screening script can also add applicability-domain warning columns using Morgan fingerprint Tanimoto similarity to the closest reference chromophore from the model directory:
+
+```text
+nearest_training_similarity
+nearest_training_smiles
+outside_applicability_domain
+```
+
+`nearest_training_similarity` is the maximum Tanimoto similarity to any reference chromophore. `outside_applicability_domain=True` means the candidate is below the selected similarity threshold and should be treated as a lower-confidence model extrapolation. This warning does not experimentally validate or invalidate a candidate; it only indicates whether the candidate is chemically close to molecules used as the model reference set.
+
+By default, the script tries to use:
+
+```text
+models/chemfluor_combined/combined_modeling_rows_after_feature_merge.csv
+```
+
+That file contains all post-feature-merge modeling rows. The current training script does not save row-level train/test split membership, so the applicability reference set may include both training and held-out chromophores. If no reference CSV is found, screening continues and prints a warning.
+
 ### Screen for 450 nm emission in ethanol
 
 ```powershell
@@ -1196,6 +1224,8 @@ python scripts/screen_candidate_molecules.py `
   --target-emission 450 `
   --model-dir models/chemfluor_combined `
   --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv `
+  --applicability-reference-csv models/chemfluor_combined/combined_modeling_rows_after_feature_merge.csv `
+  --applicability-threshold 0.30 `
   --out outputs/candidate_screening/ranked_scaffold_candidates_ethanol_450.csv
 ```
 
@@ -1208,6 +1238,8 @@ python scripts/screen_candidate_molecules.py `
   --target-emission 520 `
   --model-dir models/chemfluor_combined `
   --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv `
+  --applicability-reference-csv models/chemfluor_combined/combined_modeling_rows_after_feature_merge.csv `
+  --applicability-threshold 0.30 `
   --out outputs/candidate_screening/ranked_scaffold_candidates_ethanol_520.csv
 ```
 
@@ -1220,6 +1252,21 @@ python scripts/screen_candidate_molecules.py `
   --target-emission 600 `
   --model-dir models/chemfluor_combined `
   --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv `
+  --applicability-reference-csv models/chemfluor_combined/combined_modeling_rows_after_feature_merge.csv `
+  --applicability-threshold 0.30 `
+  --out outputs/candidate_screening/ranked_scaffold_candidates_ethanol_600.csv
+```
+
+To disable applicability-domain scoring:
+
+```powershell
+python scripts/screen_candidate_molecules.py `
+  --candidates data/generated_candidates/scaffold_candidates.csv `
+  --solvent-smiles CCO `
+  --target-emission 600 `
+  --model-dir models/chemfluor_combined `
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv `
+  --no-applicability-domain `
   --out outputs/candidate_screening/ranked_scaffold_candidates_ethanol_600.csv
 ```
 
@@ -1236,10 +1283,72 @@ predicted_absorption_nm
 predicted_emission_nm
 predicted_quantum_yield
 predicted_log_extinction
+nearest_training_similarity
+nearest_training_smiles
+outside_applicability_domain
 emission_error_from_target
 score
 estimated_brightness_score
 ```
+
+---
+
+## 9. Summarize Candidate Screening Results
+
+This script combines multiple ranked candidate-screening CSV files into a single top-N table and a concise Markdown report.
+
+It preserves the ranking order from each screening file, adds the target emission wavelength and rank, summarizes the best candidate for each target, and reports scaffold/substituent counts among the top candidates.
+
+```powershell
+python scripts/summarize_candidate_screening.py `
+  --inputs outputs/candidate_screening/ranked_scaffold_candidates_ethanol_450.csv outputs/candidate_screening/ranked_scaffold_candidates_ethanol_520.csv outputs/candidate_screening/ranked_scaffold_candidates_ethanol_600.csv `
+  --targets 450 520 600 `
+  --out outputs/candidate_screening/screening_summary.csv `
+  --markdown outputs/candidate_screening/screening_summary.md `
+  --top-n 10
+```
+
+Generated outputs:
+
+```text
+outputs/candidate_screening/screening_summary.csv
+outputs/candidate_screening/screening_summary.md
+```
+
+Summary CSV columns:
+
+```text
+target_emission_nm
+rank
+name
+scaffold
+substituent
+smiles
+canonical_smiles
+solvent_smiles
+predicted_absorption_nm
+predicted_emission_nm
+predicted_quantum_yield
+predicted_log_extinction
+nearest_training_similarity
+nearest_training_smiles
+outside_applicability_domain
+emission_error_from_target
+score
+estimated_brightness_score
+```
+
+The Markdown report includes:
+
+* best candidate by target emission wavelength
+* blue/green/orange-red interpretation notes for targets near 450, 520, and 600 nm
+* scaffold counts among the top N candidates
+* substituent counts when available
+* notes when the best candidate is more than 30 nm from the target
+* notes when a scaffold family dominates the top N candidates
+* a caution that model-ranked candidates are priorities for follow-up, not experimentally validated fluorophores
+
+The summarizer is reusable for any ranked candidate CSVs and target wavelengths. If optional columns are missing, it writes the columns that are available and prints a warning instead of crashing.
 
 ---
 
@@ -1254,6 +1363,8 @@ Using the 59 generated coumarin/naphthalimide candidates in ethanol:
 |          600 nm | naphthalimide_4_substituted_n_butyl_dimethylamino | N-butyl naphthalimide | dimethylamino |           562.3 nm |        0.428 |
 
 The 600 nm result shows that the current small candidate library does not reach far enough into the red/orange region. Future work should expand the scaffold library with more red-shifted fluorophores.
+
+The generated screening summary adds the same conclusion automatically for the 600 nm target because the top candidate is 37.7 nm away from the target emission wavelength.
 
 ---
 
@@ -1308,6 +1419,18 @@ Run only the data-standardization tests:
 python -m pytest tests/test_data_standardization.py
 ```
 
+Run only the applicability-domain tests:
+
+```powershell
+python -m pytest tests/test_applicability_domain.py
+```
+
+Run only the candidate-screening summary tests:
+
+```powershell
+python -m pytest tests/test_summarize_candidate_screening.py
+```
+
 ---
 
 ## Current Status of the Expanded Workflow
@@ -1321,6 +1444,8 @@ Random Forest and HistGradientBoosting comparison
 model reporting and error analysis
 rule-based scaffold candidate generation
 target-emission candidate screening
+Morgan Tanimoto applicability-domain warnings
+top-N candidate screening summaries
 ```
 
 The next major development step is to expand the candidate generator with additional red-shifted fluorophore scaffolds, such as BODIPY-like, rhodamine-like, fluorescein-like, cyanine-like, and larger donor-acceptor systems.
