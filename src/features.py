@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from rdkit import Chem, DataStructs
@@ -78,8 +80,10 @@ def rdkit_descriptors(mols: list[Chem.Mol]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def load_or_create_solvent_descriptors(df: pd.DataFrame) -> tuple[pd.DataFrame | None, bool]:
-    path = config.SOLVENT_DESCRIPTOR_PATH
+def load_or_create_solvent_descriptors(
+    df: pd.DataFrame, path: str | Path | None = None
+) -> tuple[pd.DataFrame | None, bool]:
+    descriptor_path = config.resolve_solvent_descriptor_path(path, must_exist=False)
     descriptor_cols = [
         "dielectric_constant",
         "refractive_index",
@@ -88,17 +92,18 @@ def load_or_create_solvent_descriptors(df: pd.DataFrame) -> tuple[pd.DataFrame |
         "hbond_acceptor",
         "polarity_ET30",
     ]
-    if not path.exists():
-        print(f"Solvent descriptor file not found. Creating template: {path}")
+    if not descriptor_path.exists():
+        print(f"Solvent descriptor file not found. Creating template: {descriptor_path}")
+        descriptor_path.parent.mkdir(parents=True, exist_ok=True)
         template = pd.DataFrame({config.SOLVENT_COL: sorted(df[config.SOLVENT_COL].unique())})
         for col in descriptor_cols:
             template[col] = np.nan
-        template.to_csv(path, index=False)
+        template.to_csv(descriptor_path, index=False)
         return None, False
 
-    solvent_df = pd.read_csv(path)
+    solvent_df = pd.read_csv(descriptor_path)
     if config.SOLVENT_COL not in solvent_df.columns:
-        raise ValueError(f"{path} must contain a '{config.SOLVENT_COL}' column.")
+        raise ValueError(f"{descriptor_path} must contain a '{config.SOLVENT_COL}' column.")
     solvent_df[config.SOLVENT_COL] = solvent_df[config.SOLVENT_COL].astype(str).str.strip()
     duplicate_solvents = solvent_df[config.SOLVENT_COL].duplicated().sum()
     if duplicate_solvents:
@@ -120,11 +125,15 @@ def _normalized_solvent_series(df: pd.DataFrame) -> pd.Series:
     return df[config.SOLVENT_COL].astype(str).str.strip()
 
 
-def solvent_features_train(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+def solvent_features_train(
+    df: pd.DataFrame, solvent_descriptor_path: str | Path | None = None
+) -> tuple[pd.DataFrame, dict]:
     df = df.copy()
     df[config.SOLVENT_COL] = _normalized_solvent_series(df)
     one_hot = pd.get_dummies(df[config.SOLVENT_COL], prefix="solvent", dtype=int)
-    solvent_df, has_real_descriptors = load_or_create_solvent_descriptors(df)
+    solvent_df, has_real_descriptors = load_or_create_solvent_descriptors(
+        df, solvent_descriptor_path
+    )
     artifact = {
         "known_solvents": sorted(df[config.SOLVENT_COL].dropna().unique().tolist()),
         "one_hot_columns": one_hot.columns.tolist(),
@@ -194,12 +203,14 @@ def solvent_features_inference(df: pd.DataFrame, solvent_artifact: dict) -> tupl
     return pd.concat([one_hot.reset_index(drop=True), desc.reset_index(drop=True)], axis=1), status
 
 
-def build_feature_matrix_train(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+def build_feature_matrix_train(
+    df: pd.DataFrame, solvent_descriptor_path: str | Path | None = None
+) -> tuple[pd.DataFrame, dict]:
     print("Building features: Morgan fingerprints, MACCS keys, RDKit descriptors, and solvent features.")
     df = df.copy()
     df[config.SOLVENT_COL] = _normalized_solvent_series(df)
     mols = mols_from_smiles(df["canonical_smiles"])
-    solv, solvent_artifact = solvent_features_train(df)
+    solv, solvent_artifact = solvent_features_train(df, solvent_descriptor_path)
     parts = [
         morgan_fingerprints(mols),
         maccs_keys(mols),

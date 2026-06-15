@@ -73,6 +73,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", choices=["rf", "histgb"], default="rf")
     parser.add_argument("--n-bits", default=2048, type=int)
     parser.add_argument("--radius", default=2, type=int)
+    parser.add_argument(
+        "--standardized-combined",
+        type=Path,
+        default=None,
+        help="Optional pre-standardized, deduplicated combined training CSV.",
+    )
     return parser.parse_args()
 
 
@@ -87,6 +93,41 @@ def load_combined_rows(deep4chem_path: Path, chemfluor_path: Path) -> pd.DataFra
     # Keep direct references visible for users of this script and static analyzers.
     _ = (load_deep4chem, load_chemfluor, canonicalize_smiles)
     return combine_training_data(deep4chem_path, chemfluor_path)
+
+
+def load_standardized_combined(path: Path) -> pd.DataFrame:
+    """Load a pre-standardized combined training table."""
+    if not path.exists():
+        raise FileNotFoundError(f"Standardized combined CSV not found: {path}")
+    rows = pd.read_csv(path, low_memory=False)
+    required = ["canonical_chromophore_smiles", "canonical_solvent_smiles", "source_dataset"]
+    missing = [column for column in required if column not in rows.columns]
+    if missing:
+        raise ValueError(f"Standardized combined CSV missing required columns: {missing}")
+    for target in TARGET_COLUMNS:
+        if target not in rows.columns:
+            rows[target] = pd.NA
+        rows[target] = pd.to_numeric(rows[target], errors="coerce")
+    rows = rows.dropna(subset=["canonical_chromophore_smiles"]).copy()
+    rows = rows.dropna(subset=TARGET_COLUMNS, how="all").copy()
+    return rows.reset_index(drop=True)
+
+
+def print_training_data_diagnostics(rows: pd.DataFrame) -> None:
+    """Print source and red-region diagnostics for standardized training rows."""
+    print("\nTraining data diagnostics:")
+    print("Rows by source:")
+    print(rows["source_dataset"].astype(str).value_counts().to_string())
+    emission_rows = rows[rows["emission_nm"].notna()].copy()
+    print("\nEmission rows by source:")
+    print(emission_rows["source_dataset"].astype(str).value_counts().to_string())
+    for threshold in [580, 600, 650, 700]:
+        subset = emission_rows[emission_rows["emission_nm"] >= threshold]
+        print(f"\nEmission >= {threshold} nm by source:")
+        if subset.empty:
+            print("(none)")
+        else:
+            print(subset["source_dataset"].astype(str).value_counts().to_string())
 
 
 def load_solvent_descriptors(path: Path) -> pd.DataFrame:
@@ -384,9 +425,14 @@ def main() -> int:
         require_rdkit()
         args.out_dir.mkdir(parents=True, exist_ok=True)
 
-        combined_rows = load_combined_rows(args.deep4chem, args.chemfluor)
+        if args.standardized_combined is not None:
+            combined_rows = load_standardized_combined(args.standardized_combined)
+            print(f"Loaded standardized combined rows from: {args.standardized_combined}")
+        else:
+            combined_rows = load_combined_rows(args.deep4chem, args.chemfluor)
         combined_path = args.out_dir / "combined_standardized_training_rows.csv"
         combined_rows.to_csv(combined_path, index=False)
+        print_training_data_diagnostics(combined_rows)
 
         solvent_descriptors = load_solvent_descriptors(args.solvent_descriptors)
         modeling_rows, descriptor_columns = merge_solvent_descriptors(

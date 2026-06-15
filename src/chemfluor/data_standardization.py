@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
+import numpy as np
+
 import pandas as pd
 
 try:
@@ -41,6 +43,15 @@ STANDARD_COLUMNS = [
     "source_dataset",
 ]
 
+FLUODB_METADATA_COLUMNS = [
+    "fluodb_source",
+    "fluodb_tag",
+    "fluodb_tag_name",
+    "fluodb_solvent_num",
+    "fluodb_split",
+    "reference_doi",
+]
+
 TARGET_COLUMNS = [
     "absorption_nm",
     "emission_nm",
@@ -56,6 +67,22 @@ CHEMFLUOR_COLUMN_CANDIDATES = {
     "emission_nm": ["Emission/nm", "emission_nm", "Emission max (nm)"],
     "quantum_yield": ["PLQY", "Quantum yield", "quantum_yield"],
 }
+
+FLUODB_COLUMN_MAP = {
+    "smiles": "chromophore_smiles",
+    "solvent": "solvent_original",
+    "absorption/nm": "absorption_nm",
+    "emission/nm": "emission_nm",
+    "plqy": "quantum_yield",
+    "reference(doi)": "reference_doi",
+    "source": "fluodb_source",
+    "tag": "fluodb_tag",
+    "tag_name": "fluodb_tag_name",
+    "solvent_num": "fluodb_solvent_num",
+    "split": "fluodb_split",
+}
+
+SOURCE_PREFERENCE = ["chemfluor", "deep4chem", "FluoDB-Lite"]
 
 CHEMFLUOR_KEYWORD_CANDIDATES = {
     "chromophore_smiles": ["smiles", "chromophore"],
@@ -143,6 +170,15 @@ def _finalize_standard_columns(df: pd.DataFrame) -> pd.DataFrame:
     return finalized[STANDARD_COLUMNS]
 
 
+def _finalize_standard_and_metadata_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure standardized columns plus FluoDB metadata are present."""
+    finalized = df.copy()
+    for column in [*STANDARD_COLUMNS, *FLUODB_METADATA_COLUMNS]:
+        if column not in finalized.columns:
+            finalized[column] = pd.NA
+    return finalized[[*STANDARD_COLUMNS, *FLUODB_METADATA_COLUMNS]]
+
+
 def _infer_column(
     columns: pd.Index, output_name: str, required: bool = True
 ) -> str | None:
@@ -216,6 +252,140 @@ def load_chemfluor(path: str | Path) -> pd.DataFrame:
     )
     standardized["source_dataset"] = "chemfluor"
     return _finalize_standard_columns(standardized)
+
+
+def load_fluodb_lite(path: str | Path) -> pd.DataFrame:
+    """Load and standardize FluoDB-Lite into the shared ChemFluor schema."""
+    df = _load_csv(path)
+    required = ["smiles", "solvent"]
+    _validate_columns(df, required, "FluoDB-Lite CSV")
+
+    standardized = pd.DataFrame()
+    for input_name, output_name in FLUODB_COLUMN_MAP.items():
+        standardized[output_name] = df[input_name] if input_name in df.columns else pd.NA
+
+    standardized["lifetime_ns"] = pd.NA
+    standardized = _coerce_targets(standardized)
+    extinction = pd.to_numeric(df.get("e/m-1cm-1", pd.NA), errors="coerce")
+    standardized["log_extinction"] = np.where(
+        extinction > 0, np.log10(extinction), np.nan
+    )
+    standardized["chromophore_smiles"] = standardized["chromophore_smiles"].astype(str).str.strip()
+    standardized["solvent_original"] = standardized["solvent_original"].apply(
+        lambda value: str(value).strip() if pd.notna(value) else pd.NA
+    )
+    standardized["canonical_chromophore_smiles"] = standardized[
+        "chromophore_smiles"
+    ].map(canonicalize_smiles)
+    standardized["canonical_solvent_smiles"] = standardized["solvent_original"].map(
+        canonicalize_smiles
+    )
+    standardized["source_dataset"] = "FluoDB-Lite"
+    standardized = standardized.dropna(subset=["canonical_chromophore_smiles"]).copy()
+    standardized = standardized.dropna(subset=TARGET_COLUMNS, how="all").copy()
+    return _finalize_standard_and_metadata_columns(standardized).reset_index(drop=True)
+
+
+def _target_key_value(value: object) -> str:
+    """Represent numeric target values stably for duplicate keys."""
+    if pd.isna(value):
+        return "<NA>"
+    return f"{float(value):.6g}"
+
+
+def make_measurement_dedup_key(df: pd.DataFrame) -> pd.Series:
+    """Build an exact-measurement duplicate key for standardized rows."""
+    parts = pd.DataFrame(index=df.index)
+    for column in ["canonical_chromophore_smiles", "canonical_solvent_smiles"]:
+        parts[column] = df.get(column, pd.Series(pd.NA, index=df.index)).fillna("<NA>").astype(str)
+    for column in ["absorption_nm", "emission_nm", "quantum_yield", "log_extinction"]:
+        parts[column] = df.get(column, pd.Series(pd.NA, index=df.index)).map(_target_key_value)
+    return parts.astype(str).agg("|".join, axis=1)
+
+
+def _source_rank(source: object, prefer_sources: list[str]) -> int:
+    source_text = str(source).lower()
+    lowered = [item.lower() for item in prefer_sources]
+    return lowered.index(source_text) if source_text in lowered else len(lowered)
+
+
+def deduplicate_standardized_rows(
+    df: pd.DataFrame, prefer_sources: list[str] | None = None
+) -> pd.DataFrame:
+    """Remove exact measurement duplicates while keeping source-preferred rows."""
+    prefer_sources = prefer_sources or SOURCE_PREFERENCE
+    working = df.copy()
+    working["_dedup_key"] = make_measurement_dedup_key(working)
+    working["_source_rank"] = working["source_dataset"].map(
+        lambda source: _source_rank(source, prefer_sources)
+    )
+    working["_original_order"] = range(len(working))
+    working = working.sort_values(
+        ["_dedup_key", "_source_rank", "_original_order"], kind="mergesort"
+    )
+    deduplicated = working.drop_duplicates(subset=["_dedup_key"], keep="first")
+    return deduplicated.sort_values("_original_order").drop(
+        columns=["_dedup_key", "_source_rank", "_original_order"]
+    ).reset_index(drop=True)
+
+
+def molecule_solvent_replicates(df: pd.DataFrame) -> pd.DataFrame:
+    """Return molecule-solvent pairs with multiple non-identical measurements."""
+    working = df.copy()
+    working["_measurement_key"] = make_measurement_dedup_key(working)
+    group_columns = ["canonical_chromophore_smiles", "canonical_solvent_smiles"]
+    grouped = (
+        working.groupby(group_columns, dropna=False)
+        .agg(
+            row_count=("source_dataset", "size"),
+            unique_measurements=("_measurement_key", "nunique"),
+            source_combination=("source_dataset", lambda values: ",".join(sorted(set(map(str, values))))),
+            min_emission_nm=("emission_nm", "min"),
+            max_emission_nm=("emission_nm", "max"),
+        )
+        .reset_index()
+    )
+    return grouped[
+        (grouped["row_count"] > 1) & (grouped["unique_measurements"] > 1)
+    ].reset_index(drop=True)
+
+
+def red_region_counts(df: pd.DataFrame) -> dict[str, int]:
+    """Count emission coverage at red/orange/NIR thresholds."""
+    emission = pd.to_numeric(df.get("emission_nm"), errors="coerce")
+    return {
+        f"emission_ge_{threshold}": int((emission >= threshold).sum())
+        for threshold in [550, 580, 600, 650, 700, 750]
+    }
+
+
+def analyze_dataset_overlap(df: pd.DataFrame) -> dict:
+    """Summarize exact duplicates, source overlap, replicates, and red coverage."""
+    working = df.copy()
+    working["_dedup_key"] = make_measurement_dedup_key(working)
+    duplicate_rows_removed = int(working.duplicated("_dedup_key").sum())
+    duplicate_groups = working[working.duplicated("_dedup_key", keep=False)]
+    source_combinations = (
+        duplicate_groups.groupby("_dedup_key")["source_dataset"]
+        .apply(lambda values: ",".join(sorted(set(map(str, values)))))
+        .value_counts()
+        .to_dict()
+    )
+    fluodb_keys = set(working.loc[working["source_dataset"].astype(str).str.lower() == "fluodb-lite", "_dedup_key"])
+    chemfluor_keys = set(working.loc[working["source_dataset"].astype(str).str.lower() == "chemfluor", "_dedup_key"])
+    deep4chem_keys = set(working.loc[working["source_dataset"].astype(str).str.lower() == "deep4chem", "_dedup_key"])
+    replicates = molecule_solvent_replicates(working.drop(columns=["_dedup_key"]))
+    return {
+        "rows_by_source": working["source_dataset"].astype(str).value_counts().to_dict(),
+        "total_rows": int(len(working)),
+        "unique_exact_measurements": int(working["_dedup_key"].nunique()),
+        "exact_duplicate_rows_removed": duplicate_rows_removed,
+        "molecule_solvent_pairs_with_multiple_measurements": int(len(replicates)),
+        "duplicate_counts_by_source_combination": source_combinations,
+        "fluodb_exact_overlaps_with_chemfluor": int(len(fluodb_keys & chemfluor_keys)),
+        "fluodb_exact_overlaps_with_deep4chem": int(len(fluodb_keys & deep4chem_keys)),
+        "red_region_counts": red_region_counts(working),
+    }
 
 
 def combine_training_data(

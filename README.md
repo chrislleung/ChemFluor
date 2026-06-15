@@ -160,7 +160,7 @@ This project uses scientific Python packages such as RDKit, LightGBM, XGBoost, C
 
 ## Required Files
 
-For full training, place these files in the project root:
+For full training with the original ChemFluor workflow, provide:
 
 ```text
 chemfluor_data.csv
@@ -170,6 +170,26 @@ solvent_descriptors.csv
 `chemfluor_data.csv` contains the main ChemFluor dataset.
 
 `solvent_descriptors.csv` contains auxiliary solvent-property features used by the model.
+
+The original workflow now supports both the current `data/...` layout and the older root-level layout. When no explicit path is provided, it searches in this order:
+
+```text
+data/chemfluor_data.csv
+chemfluor_data.csv
+
+data/solvent_descriptors.csv
+solvent_descriptors.csv
+```
+
+You can also pass explicit paths:
+
+```powershell
+python -m src.train `
+  --data-path data/chemfluor_data.csv `
+  --solvent-descriptors data/solvent_descriptors.csv
+```
+
+The expanded combined ChemFluor + Deep4Chem workflow uses the `data/...` layout in its examples and scripts.
 
 Expected solvent descriptor columns:
 
@@ -183,13 +203,13 @@ hbond_acceptor
 polarity_ET30
 ```
 
-If `solvent_descriptors.csv` is missing, the training pipeline can create a blank template from the solvents found in the dataset. If descriptor values are partially missing, the pipeline reports the missing solvents and median-imputes the missing numeric values.
+If no solvent descriptor file is found in either default location, the training pipeline can create a blank template at `data/solvent_descriptors.csv` from the solvents found in the dataset. If descriptor values are partially missing, the pipeline reports the missing solvents and median-imputes the missing numeric values.
 
 ---
 
 ## Solvent Descriptors
 
-This repository includes `solvent_descriptors.csv`, an auxiliary table of solvent properties used for feature generation.
+This repository includes `data/solvent_descriptors.csv`, an auxiliary table of solvent properties used for feature generation.
 
 The table includes descriptors such as:
 
@@ -436,19 +456,20 @@ cd ChemFluor_Project
 
 ### 3. Add Required Data Files
 
-Place the following files in the project root:
+Place the following files in `data/` for the current project layout, or in the project root for the older layout:
 
 ```text
-chemfluor_data.csv
-solvent_descriptors.csv
+data/chemfluor_data.csv
+data/solvent_descriptors.csv
 ```
 
 After setup, the project should look like:
 
 ```text
 ChemFluor_Project/
-  chemfluor_data.csv
-  solvent_descriptors.csv
+  data/
+    chemfluor_data.csv
+    solvent_descriptors.csv
   run_chemfluor.sh
   src/
   notebooks/
@@ -1010,6 +1031,7 @@ Useful options:
 ```powershell
 --n-bits 2048
 --radius 2
+--standardized-combined data/processed/fluodb_lite/combined_deduplicated.csv
 ```
 
 Model outputs are saved under the chosen model directory, including:
@@ -1026,6 +1048,58 @@ predictions_log_extinction.csv
 ```
 
 These outputs are generated artifacts and should not be committed to GitHub.
+
+---
+
+## Optional FluoDB-Lite Integration
+
+FluoDB-Lite is an aggregated public fluorophore dataset. Because it includes rows from sources such as Deep4Chem and ChemFluor, it should not be blindly appended to the current training data. The workflow first analyzes FluoDB-Lite, then standardizes it into the shared schema, reports overlap, removes exact measurement duplicates with source priority, and only then uses the deduplicated file for training.
+
+Analyze the raw FluoDB-Lite file:
+
+```powershell
+python scripts/analyze_fluodb_lite.py `
+  --input data/raw/fluodb/FluoDB-Lite.csv `
+  --out-dir outputs/fluodb_lite_analysis
+```
+
+Prepare standardized and deduplicated files:
+
+```powershell
+python scripts/prepare_fluodb_lite.py `
+  --fluodb data/raw/fluodb/FluoDB-Lite.csv `
+  --chemfluor data/chemfluor_data.csv `
+  --deep4chem "data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.csv" `
+  --out-dir data/processed/fluodb_lite
+```
+
+Generated preparation outputs include:
+
+```text
+data/processed/fluodb_lite/chemfluor_standardized.csv
+data/processed/fluodb_lite/deep4chem_standardized.csv
+data/processed/fluodb_lite/fluodb_lite_standardized.csv
+data/processed/fluodb_lite/combined_before_dedup.csv
+data/processed/fluodb_lite/combined_deduplicated.csv
+data/processed/fluodb_lite/overlap_report.md
+data/processed/fluodb_lite/overlap_summary.json
+data/processed/fluodb_lite/red_region_summary.csv
+data/processed/fluodb_lite/molecule_solvent_replicates.csv
+```
+
+Train from the deduplicated standardized file:
+
+```powershell
+python scripts/train_combined_predictors.py `
+  --standardized-combined data/processed/fluodb_lite/combined_deduplicated.csv `
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv `
+  --out-dir models/chemfluor_combined_fluodb `
+  --model rf
+```
+
+Exact duplicate measurements are defined as rows with the same canonical chromophore SMILES, canonical solvent SMILES, absorption, emission, quantum yield, and log extinction. Source priority is ChemFluor first, Deep4Chem second, and FluoDB-Lite third. Molecule-solvent pairs with different reported values are reported as replicates rather than collapsed automatically.
+
+Processed FluoDB-Lite files and analysis reports are generated artifacts and should not be committed unless intentionally curated for the project.
 
 ---
 

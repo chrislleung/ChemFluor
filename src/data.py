@@ -16,11 +16,9 @@ def canonicalize_smiles(smiles: object) -> str | None:
 
 
 def load_raw_data(path=None) -> pd.DataFrame:
-    path = path or config.DATA_PATH
-    print(f"Loading dataset: {path}")
-    if not path.exists():
-        raise FileNotFoundError(f"Dataset not found: {path}")
-    return pd.read_csv(path, encoding="latin1")
+    resolved_path = config.resolve_chemfluor_data_path(path)
+    print(f"Loading dataset: {resolved_path}")
+    return pd.read_csv(resolved_path, encoding="latin1")
 
 
 def clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
@@ -82,4 +80,3 @@ def clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
     )
     print(f"Cleaned rows: {len(grouped)}")
     return grouped, stats
-

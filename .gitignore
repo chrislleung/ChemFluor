@@ -47,6 +47,7 @@ slurm-*.out
 *.joblib
 *.pkl
 *.pickle
+catboost_info/
 models/**/*.joblib
 models/**/*.pkl
 models/**/*.pickle
@@ -66,14 +67,16 @@ figures/
 # Generated intermediate data
 # =========================
 # These are reproducible from scripts and can be large.
-models/**/predictions_*.csv
-models/**/metrics.json
-models/**/feature_metadata.json
-models/**/combined_standardized_training_rows.csv
-models/**/combined_modeling_rows_after_feature_merge.csv
+models/
+# models/**/predictions_*.csv
+# models/**/metrics.json
+# models/**/feature_metadata.json
+# models/**/combined_standardized_training_rows.csv
+# models/**/combined_modeling_rows_after_feature_merge.csv
 
 # Candidate-screening outputs are generated and reproducible.
 data/generated_candidates/
+data/processed/fluodb_lite/
 outputs/candidate_screening/
 
 # =========================

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -25,6 +26,32 @@ from src.models import (
 from src.plots import confusion_matrix_plot, error_by_solvent, predicted_vs_actual, residuals_vs_actual
 from src.splitting import get_scaffold, random_split_indices, scaffold_train_test_split
 from src.utils import ensure_output_dirs, save_json, save_model
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Train the original ChemFluor prediction workflow."
+    )
+    parser.add_argument(
+        "--data-path",
+        type=Path,
+        default=None,
+        help=(
+            "ChemFluor dataset CSV. Defaults to data/chemfluor_data.csv, "
+            "then chemfluor_data.csv."
+        ),
+    )
+    parser.add_argument(
+        "--solvent-descriptors",
+        type=Path,
+        default=None,
+        help=(
+            "Solvent descriptor CSV. Defaults to data/solvent_descriptors.csv, "
+            "then solvent_descriptors.csv. If neither exists, a template is "
+            "created at data/solvent_descriptors.csv."
+        ),
+    )
+    return parser.parse_args()
 
 
 def nm_to_ev(y):
@@ -304,13 +331,16 @@ def save_inference_metadata(df: pd.DataFrame, X: pd.DataFrame, feature_artifacts
 
 
 def main() -> None:
+    args = parse_args()
     ensure_output_dirs()
-    raw = load_raw_data()
+    raw = load_raw_data(args.data_path)
     df, dataset_stats = clean_data(raw)
     df = df.reset_index(drop=True)
     df["scaffold"] = df["canonical_smiles"].map(get_scaffold)
     dataset_stats["unique_scaffolds"] = df["scaffold"].nunique()
-    X, feature_artifacts = build_feature_matrix_train(df)
+    X, feature_artifacts = build_feature_matrix_train(
+        df, solvent_descriptor_path=args.solvent_descriptors
+    )
     save_model(feature_artifacts, config.MODEL_DIR / "feature_artifacts.pkl")
     save_inference_metadata(df, X, feature_artifacts)
 
