@@ -695,7 +695,6 @@ python -m src.predict \
   --csv example_candidates.csv \
   --save-csv outputs/predictions/batch_predictions.csv
 ```
----
 
 # Expanded ChemFluor + Deep4Chem + FluoDB-Lite Workflow
 
@@ -1274,14 +1273,14 @@ scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/models/chemflu
 Copy model reports:
 
 ```powershell
-scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/combined_model_report_fluodb outputs/
-scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/error_analysis_fluodb outputs/
+scp -r johndoe@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/outputs/combined_model_report_fluodb outputs/
+scp -r johndoe@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/outputs/error_analysis_fluodb outputs/
 ```
 
 Copy candidate-screening outputs if needed:
 
 ```powershell
-scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/candidate_screening outputs/
+scp -r johndoe@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/outputs/candidate_screening outputs/
 ```
 
 These copied files are useful for local inspection and reporting, but they should usually remain untracked by Git.
@@ -1451,44 +1450,38 @@ The Markdown report includes:
 
 ---
 
-# Predicting New Molecules
+## Predicting a New Molecule with the Combined Model
 
-After training the original ChemFluor workflow, run prediction from the project root:
+Use this script for models trained by `scripts/train_combined_predictors.py`. It builds the same Morgan fingerprint plus solvent-descriptor feature representation used by the combined ChemFluor + Deep4Chem workflow.
 
-```bash
-python -m src.predict --smiles "CCO" --solvent "MeOH"
-```
+**run these on the Compute Canada Servers
 
-Save a JSON report:
+ChemFluor + Deep4Chem model:
 
 ```bash
-python -m src.predict \
+python scripts/predict_combined_molecule.py \
   --smiles "c1ccccc1" \
-  --solvent "MeCN" \
-  --name "candidate_1" \
-  --output outputs/predictions/candidate_1_prediction.json
+  --solvent-smiles "CCO" \
+  --model-dir models/chemfluor_combined \
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
+  --name candidate_1 \
+  --out outputs/predictions/candidate_1_combined_prediction.json
 ```
 
-Batch prediction uses a CSV with required columns:
-
-```text
-SMILES
-solvent
-```
-
-Optional column:
-
-```text
-name
-```
-
-Run batch prediction:
+FluoDB-expanded model:
 
 ```bash
-python -m src.predict \
-  --csv example_candidates.csv \
-  --save-csv outputs/predictions/batch_predictions.csv
+python scripts/predict_combined_molecule.py \
+  --smiles "c1ccccc1" \
+  --solvent-smiles "CCO" \
+  --model-dir models/chemfluor_combined_fluodb \
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
+  --name candidate_1 \
+  --out outputs/predictions/candidate_1_fluodb_prediction.json \
+  --out-csv outputs/predictions/candidate_1_fluodb_prediction.csv
 ```
+
+The script predicts whichever target model files are present in the model directory and warns about missing targets. When `combined_modeling_rows_after_feature_merge.csv` is available, it also reports the nearest training-set Tanimoto similarity and flags molecules below the applicability-domain threshold.
 
 ---
 
