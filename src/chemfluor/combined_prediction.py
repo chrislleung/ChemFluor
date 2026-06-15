@@ -44,6 +44,31 @@ REFERENCE_SMILES_COLUMNS = [
     "canonical_smiles",
     "smiles",
 ]
+CONFIDENCE_INTERPRETATIONS = {
+    "high": "Candidate is close to known training/reference molecules.",
+    "medium": (
+        "Candidate is moderately similar; prediction may be useful but should be "
+        "treated cautiously."
+    ),
+    "low-medium": (
+        "Candidate is only weakly similar; prediction may be extrapolative."
+    ),
+    "low": "Candidate is outside or near the edge of the model domain.",
+    "unknown": "Applicability-domain similarity could not be computed.",
+}
+REFERENCE_MATCH_COLUMNS = [
+    "canonical_chromophore_smiles",
+    "canonical_solvent_smiles",
+    "absorption_nm",
+    "emission_nm",
+    "lifetime_ns",
+    "quantum_yield",
+    "log_extinction",
+    "source_dataset",
+    "fluodb_source",
+    "tag_name",
+    "fluodb_tag_name",
+]
 
 
 def require_rdkit() -> None:
@@ -334,6 +359,24 @@ def compute_nearest_training_similarity(
     return float(similarities[best_index]), reference_smiles[best_index]
 
 
+def similarity_confidence_label(similarity: float | None) -> str:
+    """Map nearest-reference similarity to a qualitative confidence label."""
+    if similarity is None or pd.isna(similarity):
+        return "unknown"
+    if similarity >= 0.70:
+        return "high"
+    if similarity >= 0.50:
+        return "medium"
+    if similarity >= 0.35:
+        return "low-medium"
+    return "low"
+
+
+def similarity_confidence_interpretation(label: str) -> str:
+    """Return a short human-readable interpretation for a confidence label."""
+    return CONFIDENCE_INTERPRETATIONS.get(label, CONFIDENCE_INTERPRETATIONS["unknown"])
+
+
 def applicability_domain_payload(
     canonical_smiles: str,
     model_dir: Path,
@@ -344,7 +387,14 @@ def applicability_domain_payload(
 ) -> tuple[dict[str, Any], list[str]]:
     """Build JSON-ready applicability-domain output for one candidate."""
     if disabled:
-        return {}, ["Applicability-domain scoring disabled."]
+        label = "unknown"
+        return (
+            {
+                "confidence_label": label,
+                "confidence_interpretation": similarity_confidence_interpretation(label),
+            },
+            ["Applicability-domain scoring disabled."],
+        )
     if threshold < 0 or threshold > 1:
         raise ValueError(
             f"Applicability threshold must be between 0 and 1, got {threshold}."
@@ -352,10 +402,17 @@ def applicability_domain_payload(
 
     reference_csv = model_dir / DEFAULT_APPLICABILITY_REFERENCE
     if not reference_csv.exists():
-        return {}, [
-            "No applicability reference CSV found; continuing without "
-            "applicability-domain scoring."
-        ]
+        label = "unknown"
+        return (
+            {
+                "confidence_label": label,
+                "confidence_interpretation": similarity_confidence_interpretation(label),
+            },
+            [
+                "No applicability reference CSV found; continuing without "
+                "applicability-domain scoring."
+            ],
+        )
 
     reference_fps, reference_smiles = load_reference_fingerprints(
         reference_csv=reference_csv,
@@ -370,12 +427,46 @@ def applicability_domain_payload(
         n_bits=n_bits,
     )
     outside_domain = bool(pd.isna(similarity) or similarity < threshold)
+    confidence_label = similarity_confidence_label(similarity)
     return (
         {
             "nearest_training_similarity": similarity,
             "nearest_training_smiles": nearest_smiles,
             "outside_applicability_domain": outside_domain,
             "threshold": float(threshold),
+            "confidence_label": confidence_label,
+            "confidence_interpretation": similarity_confidence_interpretation(
+                confidence_label
+            ),
         },
         [],
     )
+
+
+def exact_reference_matches_payload(
+    canonical_smiles: str,
+    model_dir: Path,
+    max_rows: int = 20,
+) -> dict[str, Any]:
+    """Return exact canonical chromophore matches from saved reference rows."""
+    reference_csv = model_dir / DEFAULT_APPLICABILITY_REFERENCE
+    if not reference_csv.exists():
+        return {"count": 0, "rows": []}
+
+    reference_rows = pd.read_csv(reference_csv, low_memory=False)
+    smiles_column = find_smiles_column(reference_rows, REFERENCE_SMILES_COLUMNS)
+    working = reference_rows.copy()
+    working["_canonical_match_smiles"] = working[smiles_column].map(canonicalize_smiles)
+    matches = working[working["_canonical_match_smiles"] == canonical_smiles].copy()
+    if matches.empty:
+        return {"count": 0, "rows": []}
+
+    output_columns = [
+        column for column in REFERENCE_MATCH_COLUMNS if column in matches.columns
+    ]
+    if smiles_column not in output_columns:
+        output_columns.insert(0, smiles_column)
+    rows = matches[output_columns].head(max_rows).replace({np.nan: None}).to_dict(
+        orient="records"
+    )
+    return {"count": int(len(matches)), "rows": rows}

@@ -20,6 +20,7 @@ from chemfluor.combined_prediction import (  # noqa: E402
     applicability_domain_payload,
     build_single_feature_matrix,
     canonicalize_required,
+    exact_reference_matches_payload,
     get_solvent_descriptor_row,
     load_or_infer_feature_metadata,
     load_solvent_descriptors,
@@ -31,7 +32,14 @@ from chemfluor.data_standardization import TARGET_COLUMNS  # noqa: E402
 DEFAULT_MODEL_DIR = Path("models/chemfluor_combined")
 DEFAULT_SOLVENT_DESCRIPTORS = Path("data/solvent_descriptors_expanded_deep4chem.csv")
 DEFAULT_OUT = Path("outputs/predictions/new_molecule_prediction.json")
-DEFAULT_APPLICABILITY_THRESHOLD = 0.30
+DEFAULT_APPLICABILITY_THRESHOLD = 0.50
+KNOWN_VALUE_ARGUMENTS = {
+    "absorption_nm": "known_absorption_nm",
+    "emission_nm": "known_emission_nm",
+    "lifetime_ns": "known_lifetime_ns",
+    "quantum_yield": "known_quantum_yield",
+    "log_extinction": "known_log_extinction",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,6 +63,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--name", default=None, help="Optional candidate name.")
     parser.add_argument("--out-csv", default=None, type=Path)
     parser.add_argument(
+        "--model-type",
+        default="rf",
+        help="Model filename suffix to load, for example rf, histgb, mlp, or lightgbm.",
+    )
+    parser.add_argument(
         "--applicability-threshold",
         default=DEFAULT_APPLICABILITY_THRESHOLD,
         type=float,
@@ -64,6 +77,19 @@ def parse_args() -> argparse.Namespace:
         "--no-applicability-domain",
         action="store_true",
         help="Disable Morgan fingerprint Tanimoto applicability-domain scoring.",
+    )
+    parser.add_argument("--known-absorption-nm", type=float, default=None)
+    parser.add_argument("--known-emission-nm", type=float, default=None)
+    parser.add_argument("--known-lifetime-ns", type=float, default=None)
+    parser.add_argument("--known-quantum-yield", type=float, default=None)
+    parser.add_argument("--known-log-extinction", type=float, default=None)
+    parser.add_argument(
+        "--check-exact-reference-match",
+        action="store_true",
+        help=(
+            "Report exact canonical chromophore matches from "
+            "combined_modeling_rows_after_feature_merge.csv."
+        ),
     )
     return parser.parse_args()
 
@@ -76,12 +102,14 @@ def validate_model_dir(model_dir: Path) -> None:
         raise ValueError(f"Model path is not a directory: {model_dir}")
 
 
-def load_available_models(model_dir: Path) -> tuple[dict[str, Any], list[str]]:
+def load_available_models(
+    model_dir: Path, model_type: str = "rf"
+) -> tuple[dict[str, Any], list[str]]:
     """Load every target model present in the combined model directory."""
     models: dict[str, Any] = {}
     warnings: list[str] = []
     for target in TARGET_COLUMNS:
-        path = model_dir / f"{target}_rf.joblib"
+        path = model_dir / f"{target}_{model_type}.joblib"
         if path.exists():
             models[target] = joblib.load(path)
         else:
@@ -128,17 +156,61 @@ def predict_available_targets(
     return predictions
 
 
+def collect_known_values(args: argparse.Namespace) -> dict[str, float]:
+    """Collect optional known target values from parsed CLI arguments."""
+    known_values: dict[str, float] = {}
+    for target, argument_name in KNOWN_VALUE_ARGUMENTS.items():
+        value = getattr(args, argument_name)
+        if value is not None:
+            known_values[target] = float(value)
+    return known_values
+
+
+def compute_prediction_errors(
+    predictions: dict[str, float],
+    known_values: dict[str, float],
+) -> dict[str, dict[str, float]]:
+    """Compute residual and absolute error for targets with prediction and known value."""
+    errors: dict[str, dict[str, float]] = {}
+    for target, known in known_values.items():
+        if target not in predictions:
+            continue
+        predicted = float(predictions[target])
+        residual = predicted - float(known)
+        errors[target] = {
+            "predicted": predicted,
+            "known": float(known),
+            "residual": residual,
+            "absolute_error": abs(residual),
+        }
+    return errors
+
+
 def flatten_for_csv(payload: dict[str, Any]) -> pd.DataFrame:
     """Flatten the JSON payload into a one-row CSV-friendly table."""
     row: dict[str, Any] = {
         key: value
         for key, value in payload.items()
-        if key not in {"predictions", "applicability_domain"}
+        if key
+        not in {
+            "predictions",
+            "applicability_domain",
+            "known_values",
+            "errors",
+            "exact_reference_matches",
+        }
     }
     for target, value in payload.get("predictions", {}).items():
         row[target] = value
     for key, value in payload.get("applicability_domain", {}).items():
         row[key] = value
+    for target, value in payload.get("known_values", {}).items():
+        row[f"known_{target}"] = value
+    for target, values in payload.get("errors", {}).items():
+        row[f"error_{target}"] = values["absolute_error"]
+        row[f"residual_{target}"] = values["residual"]
+    if "exact_reference_matches" in payload:
+        row["exact_reference_match_count"] = payload["exact_reference_matches"]["count"]
     return pd.DataFrame([row])
 
 
@@ -158,14 +230,44 @@ def print_summary(payload: dict[str, Any], warnings: list[str]) -> None:
     if payload.get("applicability_domain"):
         domain = payload["applicability_domain"]
         print("\nApplicability domain:")
+        similarity = domain.get("nearest_training_similarity")
+        if similarity is not None:
+            print(f"  nearest_training_similarity: {similarity:.4f}")
+        print(f"  confidence_label: {domain.get('confidence_label', 'unknown')}")
         print(
-            "  nearest_training_similarity: "
-            f"{domain['nearest_training_similarity']:.4f}"
+            "  interpretation: "
+            f"{domain.get('confidence_interpretation', 'Applicability-domain similarity could not be computed.')}"
         )
-        print(f"  nearest_training_smiles: {domain['nearest_training_smiles']}")
+        if "nearest_training_smiles" in domain:
+            print(f"  nearest_training_smiles: {domain['nearest_training_smiles']}")
+        if "outside_applicability_domain" in domain:
+            print(
+                "  outside_applicability_domain: "
+                f"{domain['outside_applicability_domain']}"
+            )
+        if "threshold" in domain:
+            print(f"  threshold: {domain['threshold']:.2f}")
+    if payload.get("known_values"):
+        print("\nKnown-value evaluation:")
+        for target, value in payload["known_values"].items():
+            print(f"  known_{target}: {value:.6g}")
+        for target, values in payload.get("errors", {}).items():
+            print(
+                f"  {target} residual: {values['residual']:.6g}; "
+                f"absolute_error: {values['absolute_error']:.6g}"
+            )
+    if payload.get("exact_reference_matches") is not None:
         print(
-            "  outside_applicability_domain: "
-            f"{domain['outside_applicability_domain']}"
+            "\nExact reference matches found: "
+            f"{payload['exact_reference_matches']['count']}"
+        )
+    domain = payload.get("applicability_domain", {})
+    similarity = domain.get("nearest_training_similarity")
+    threshold = domain.get("threshold", DEFAULT_APPLICABILITY_THRESHOLD)
+    if similarity is not None and similarity < threshold:
+        print(
+            "WARNING: This prediction is low-confidence for single-molecule use "
+            f"because the nearest training similarity is below {threshold:.2f}."
         )
     for warning in warnings:
         print(f"WARNING: {warning}")
@@ -183,7 +285,7 @@ def main() -> int:
             args.solvent_smiles, "solvent"
         )
 
-        models, model_warnings = load_available_models(args.model_dir)
+        models, model_warnings = load_available_models(args.model_dir, args.model_type)
         warnings.extend(model_warnings)
 
         solvent_descriptors = load_solvent_descriptors(args.solvent_descriptors)
@@ -211,6 +313,8 @@ def main() -> int:
             metadata=metadata,
             solvent_descriptor_row=solvent_descriptor_row,
         )
+        known_values = collect_known_values(args)
+        errors = compute_prediction_errors(predictions, known_values)
         applicability_domain, domain_warnings = applicability_domain_payload(
             canonical_smiles=canonical_smiles,
             model_dir=args.model_dir,
@@ -220,6 +324,12 @@ def main() -> int:
             disabled=args.no_applicability_domain,
         )
         warnings.extend(domain_warnings)
+        exact_reference_matches = None
+        if args.check_exact_reference_match:
+            exact_reference_matches = exact_reference_matches_payload(
+                canonical_smiles=canonical_smiles,
+                model_dir=args.model_dir,
+            )
 
         payload = {
             "name": args.name,
@@ -228,9 +338,15 @@ def main() -> int:
             "solvent_smiles": args.solvent_smiles,
             "canonical_solvent_smiles": canonical_solvent_smiles,
             "model_dir": str(args.model_dir),
+            "model_type": args.model_type,
             "predictions": predictions,
             "applicability_domain": applicability_domain,
         }
+        if known_values:
+            payload["known_values"] = known_values
+            payload["errors"] = errors
+        if exact_reference_matches is not None:
+            payload["exact_reference_matches"] = exact_reference_matches
 
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(

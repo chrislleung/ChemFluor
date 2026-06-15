@@ -1483,6 +1483,103 @@ python scripts/predict_combined_molecule.py \
 
 The script predicts whichever target model files are present in the model directory and warns about missing targets. When `combined_modeling_rows_after_feature_merge.csv` is available, it also reports the nearest training-set Tanimoto similarity and flags molecules below the applicability-domain threshold.
 
+### Confidence and Known-Value Evaluation
+
+For single-molecule prediction, the default applicability-domain threshold is 0.50. Candidate screening may use a lower threshold such as 0.30, but individual literature-style predictions should use the stricter threshold.
+
+Example:
+
+```bash
+python scripts/predict_combined_molecule.py \
+  --smiles "O=C(S/C(SC)=C(SC)/SC)C1=CC2=C(C=C1)NC3=CC=CC=C3S2" \
+  --solvent-smiles "CS(=O)C" \
+  --model-dir models/chemfluor_combined_fluodb \
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
+  --name literature_candidate \
+  --known-emission-nm 539 \
+  --known-quantum-yield 0.196 \
+  --check-exact-reference-match \
+  --out outputs/predictions/literature_candidate.json \
+  --out-csv outputs/predictions/literature_candidate.csv
+```
+
+The output includes predicted values, known values, absolute errors, residuals, nearest-training similarity, a confidence label, and an applicability-domain warning.
+
+## Comparing Alternative Models
+
+Random Forest is a strong baseline for the combined ChemFluor + Deep4Chem + FluoDB-Lite workflow, but it may underfit difficult red-shifted substituent effects. Gradient boosting models, Extra Trees, and neural networks can capture different structure-property patterns, so compare overall emission MAE and red/NIR-region error separately before choosing a production model.
+
+Run a local comparison:
+
+```bash
+python scripts/run_combined_model_experiments.py \
+  --standardized-combined data/processed/fluodb_lite/combined_deduplicated.csv \
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
+  --out-root models/experiments_fluodb \
+  --models rf,extratrees,histgb,gbdt,mlp \
+  --targets emission_nm,quantum_yield \
+  --compare-out outputs/model_experiments_fluodb
+```
+
+Add a known-molecule benchmark:
+
+```bash
+python scripts/run_combined_model_experiments.py \
+  --standardized-combined data/processed/fluodb_lite/combined_deduplicated.csv \
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
+  --out-root models/experiments_fluodb \
+  --models rf,extratrees,histgb,gbdt,mlp \
+  --targets emission_nm,quantum_yield \
+  --compare-out outputs/model_experiments_fluodb \
+  --benchmark-smiles "O=C(S/C(SC)=C(SC)/SC)C1=CC2=C(C=C1)NC3=CC=CC=C3S2" \
+  --benchmark-solvent-smiles "CS(=O)C" \
+  --known-emission-nm 539 \
+  --known-quantum-yield 0.196
+```
+
+The comparison writes:
+
+```text
+outputs/model_experiments_fluodb/model_comparison.csv
+outputs/model_experiments_fluodb/model_comparison.md
+outputs/model_experiments_fluodb/error_by_region_comparison.csv
+outputs/model_experiments_fluodb/benchmark_prediction_comparison.csv
+```
+
+For Nibi, create a Slurm script such as `run_model_experiments.sh`:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=chemfluor_models
+#SBATCH --time=12:00:00
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --output=outputs/model_experiments_%j.out
+#SBATCH --error=outputs/model_experiments_%j.err
+
+module purge
+module load python/3.11
+module load gcc
+module load rdkit
+
+source ~/scratch/chemfluor_env/bin/activate
+
+python scripts/run_combined_model_experiments.py \
+  --standardized-combined data/processed/fluodb_lite/combined_deduplicated.csv \
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
+  --out-root models/experiments_fluodb \
+  --models rf,extratrees,histgb,gbdt,mlp \
+  --targets emission_nm,quantum_yield \
+  --compare-out outputs/model_experiments_fluodb \
+  --n-jobs 16
+```
+
+Submit it with:
+
+```bash
+sbatch run_model_experiments.sh
+```
+
 ---
 
 # Applicability Domain and Confidence Warnings

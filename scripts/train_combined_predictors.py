@@ -11,9 +11,17 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
+from sklearn.ensemble import (
+    ExtraTreesRegressor,
+    GradientBoostingRegressor,
+    HistGradientBoostingRegressor,
+    RandomForestRegressor,
+)
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupShuffleSplit
+from sklearn.neural_network import MLPRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_PATH = PROJECT_ROOT / "src"
@@ -45,6 +53,7 @@ DEFAULT_DEEP4CHEM = Path("data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.c
 DEFAULT_CHEMFLUOR = Path("data/chemfluor_data.csv")
 DEFAULT_SOLVENT_DESCRIPTORS = Path("data/solvent_descriptors_expanded_deep4chem.csv")
 DEFAULT_OUT_DIR = Path("models/chemfluor_combined")
+MODEL_TYPES = ["rf", "extratrees", "histgb", "gbdt", "mlp", "lightgbm", "xgboost"]
 
 IDENTITY_DESCRIPTOR_COLUMNS = {
     "solvent",
@@ -70,9 +79,22 @@ def parse_args() -> argparse.Namespace:
         "--solvent-descriptors", default=DEFAULT_SOLVENT_DESCRIPTORS, type=Path
     )
     parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR, type=Path)
-    parser.add_argument("--model", choices=["rf", "histgb"], default="rf")
+    parser.add_argument("--model", choices=MODEL_TYPES, default="rf")
     parser.add_argument("--n-bits", default=2048, type=int)
     parser.add_argument("--radius", default=2, type=int)
+    parser.add_argument(
+        "--targets",
+        default=",".join(TARGET_COLUMNS),
+        help="Comma-separated target list. Defaults to all targets.",
+    )
+    parser.add_argument(
+        "--max-train-rows",
+        default=None,
+        type=int,
+        help="Optional row cap for quick debugging experiments.",
+    )
+    parser.add_argument("--random-state", default=42, type=int)
+    parser.add_argument("--n-jobs", default=-1, type=int)
     parser.add_argument(
         "--standardized-combined",
         type=Path,
@@ -80,6 +102,22 @@ def parse_args() -> argparse.Namespace:
         help="Optional pre-standardized, deduplicated combined training CSV.",
     )
     return parser.parse_args()
+
+
+def parse_targets(targets_text: str) -> list[str]:
+    """Parse and validate a comma-separated target list."""
+    targets = [target.strip() for target in targets_text.split(",") if target.strip()]
+    if not targets:
+        raise ValueError("At least one target must be requested.")
+    invalid = [target for target in targets if target not in TARGET_COLUMNS]
+    if invalid:
+        raise ValueError(
+            "Unknown target(s): "
+            + ", ".join(invalid)
+            + ". Valid targets: "
+            + ", ".join(TARGET_COLUMNS)
+        )
+    return targets
 
 
 def require_rdkit() -> None:
@@ -275,20 +313,83 @@ def add_fingerprints(
     return filtered_rows, np.vstack(fingerprints)
 
 
-def make_model(model_type: str) -> Any:
-    """Construct the requested regressor."""
+def make_model(model_type: str, random_state: int = 42, n_jobs: int = -1) -> Any | None:
+    """Construct the requested regressor, returning None when optional packages are absent."""
     if model_type == "rf":
         return RandomForestRegressor(
             n_estimators=500,
             min_samples_leaf=2,
-            random_state=42,
-            n_jobs=-1,
+            random_state=random_state,
+            n_jobs=n_jobs,
         )
-    return HistGradientBoostingRegressor(
-        max_iter=500,
-        learning_rate=0.05,
-        random_state=42,
-    )
+    if model_type == "extratrees":
+        return ExtraTreesRegressor(
+            n_estimators=500,
+            min_samples_leaf=2,
+            random_state=random_state,
+            n_jobs=n_jobs,
+        )
+    if model_type == "histgb":
+        return HistGradientBoostingRegressor(
+            max_iter=500,
+            learning_rate=0.05,
+            random_state=random_state,
+        )
+    if model_type == "gbdt":
+        return GradientBoostingRegressor(
+            n_estimators=500,
+            learning_rate=0.05,
+            max_depth=3,
+            random_state=random_state,
+        )
+    if model_type == "mlp":
+        return Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                (
+                    "mlp",
+                    MLPRegressor(
+                        hidden_layer_sizes=(512, 256),
+                        activation="relu",
+                        alpha=1e-4,
+                        learning_rate_init=1e-3,
+                        early_stopping=True,
+                        validation_fraction=0.1,
+                        max_iter=300,
+                        random_state=random_state,
+                    ),
+                ),
+            ]
+        )
+    if model_type == "lightgbm":
+        try:
+            from lightgbm import LGBMRegressor
+        except ImportError:
+            print("WARNING: lightgbm is not installed; skipping lightgbm model.")
+            return None
+        return LGBMRegressor(
+            n_estimators=500,
+            learning_rate=0.05,
+            random_state=random_state,
+            n_jobs=n_jobs,
+        )
+    if model_type == "xgboost":
+        try:
+            from xgboost import XGBRegressor
+        except ImportError:
+            print("WARNING: xgboost is not installed; skipping xgboost model.")
+            return None
+        return XGBRegressor(
+            n_estimators=500,
+            learning_rate=0.05,
+            max_depth=6,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            objective="reg:squarederror",
+            random_state=random_state,
+            n_jobs=n_jobs,
+        )
+    raise ValueError(f"Unknown model type: {model_type}")
 
 
 def build_feature_matrix(
@@ -311,6 +412,8 @@ def train_one_target(
     descriptor_columns: list[str],
     n_bits: int,
     out_dir: Path,
+    random_state: int = 42,
+    n_jobs: int = -1,
 ) -> tuple[dict[str, Any] | None, pd.Series | None]:
     """Train, evaluate, and save one target-specific regressor."""
     target_rows = rows[rows[target].notna()].copy()
@@ -324,7 +427,7 @@ def train_one_target(
         print(f"WARNING: skipping {target}; fewer than 2 chromophore groups.")
         return None, None
 
-    splitter = GroupShuffleSplit(test_size=0.2, random_state=42, n_splits=1)
+    splitter = GroupShuffleSplit(test_size=0.2, random_state=random_state, n_splits=1)
     train_index, test_index = next(splitter.split(target_rows, groups=groups))
 
     descriptor_values = target_rows[descriptor_columns].apply(
@@ -346,7 +449,9 @@ def train_one_target(
     y_train = target_rows[target].iloc[train_index].to_numpy(dtype=float)
     y_test = target_rows[target].iloc[test_index].to_numpy(dtype=float)
 
-    model = make_model(model_type)
+    model = make_model(model_type, random_state=random_state, n_jobs=n_jobs)
+    if model is None:
+        return None, None
     model.fit(x_train, y_train)
     y_pred = model.predict(x_test)
 
@@ -424,12 +529,19 @@ def main() -> int:
     try:
         require_rdkit()
         args.out_dir.mkdir(parents=True, exist_ok=True)
+        selected_targets = parse_targets(args.targets)
 
         if args.standardized_combined is not None:
             combined_rows = load_standardized_combined(args.standardized_combined)
             print(f"Loaded standardized combined rows from: {args.standardized_combined}")
         else:
             combined_rows = load_combined_rows(args.deep4chem, args.chemfluor)
+        if args.max_train_rows is not None and len(combined_rows) > args.max_train_rows:
+            combined_rows = combined_rows.sample(
+                n=args.max_train_rows,
+                random_state=args.random_state,
+            ).reset_index(drop=True)
+            print(f"Using {len(combined_rows)} sampled row(s) due to --max-train-rows.")
         combined_path = args.out_dir / "combined_standardized_training_rows.csv"
         combined_rows.to_csv(combined_path, index=False)
         print_training_data_diagnostics(combined_rows)
@@ -447,7 +559,7 @@ def main() -> int:
         metrics_by_target: dict[str, dict[str, Any]] = {}
         medians_by_target: dict[str, dict[str, float | None]] = {}
 
-        for target in TARGET_COLUMNS:
+        for target in selected_targets:
             metrics, medians = train_one_target(
                 target=target,
                 model_type=args.model,
@@ -456,6 +568,8 @@ def main() -> int:
                 descriptor_columns=descriptor_columns,
                 n_bits=args.n_bits,
                 out_dir=args.out_dir,
+                random_state=args.random_state,
+                n_jobs=args.n_jobs,
             )
             if metrics is None or medians is None:
                 continue
@@ -469,7 +583,7 @@ def main() -> int:
             "fingerprint_radius": args.radius,
             "fingerprint_n_bits": args.n_bits,
             "solvent_descriptor_columns_used": descriptor_columns,
-            "target_columns": TARGET_COLUMNS,
+            "target_columns": selected_targets,
             "model_type": args.model,
             "median_values_used_for_imputation": medians_by_target,
         }
