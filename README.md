@@ -1,52 +1,111 @@
 # ChemFluor Molecular Property Pipeline
 
-This project recreates and extends a ChemFluor-style machine learning pipeline for predicting photophysical properties of organic fluorescent molecules from molecular structure and solvent information.
+ChemFluor is a machine-learning workflow for predicting photophysical properties of organic fluorescent molecules from molecular structure and solvent information. The project began as a ChemFluor-style reproduction pipeline and has now been extended into a larger solvent-aware fluorescence modeling workflow using **ChemFluor**, **Deep4Chem**, and **FluoDB-Lite**.
 
-The model predicts:
+The current workflow supports two related tasks:
 
-* **Emission wavelength** in nanometers, which corresponds to fluorescence color
-* **PLQY**, photoluminescence quantum yield, which corresponds to brightness
-* **Bright/dim class**, using the threshold `PLQY > 0.25`
+```text
+molecule + solvent → predicted optical properties
+```
 
-The pipeline supports model training, random-split evaluation, scaffold-split evaluation, uncertainty analysis, and prediction on new user-provided molecules with applicability-domain warnings.
+and first-pass candidate screening:
+
+```text
+target emission + solvent + candidate molecules → ranked candidate fluorophores
+```
+
+This is not full neural molecular generation. The current inverse-design step uses rule-based scaffold enumeration, then trained machine-learning models rank generated candidates by predicted emission, predicted quantum yield, estimated brightness, and applicability-domain similarity.
 
 ---
 
 ## Project Overview
 
-The goal of this project is to use molecular and solvent features to predict fluorescence behavior.
+The model predicts:
+
+* **Absorption wavelength** in nanometers
+* **Emission wavelength** in nanometers, which corresponds to fluorescence color
+* **Quantum yield / PLQY**, which corresponds to brightness
+* **Lifetime**, when available
+* **Log extinction coefficient**, when available
+* **Bright/dim class** in the original ChemFluor workflow, using `PLQY > 0.25`
 
 Inputs:
 
 ```text
-SMILES
-solvent
+chromophore SMILES
+solvent or solvent SMILES
 ```
 
-Main targets:
+Core feature types:
 
-```text
-Emission/nm
-PLQY
-```
-
-The model uses a combination of:
-
-* molecular fingerprints
-* molecular descriptors
+* Morgan fingerprints
+* MACCS keys
+* RDKit molecular descriptors
 * solvent identity features
 * solvent physical descriptors
-* random and scaffold-based validation
-* multiple machine learning models
-* applicability-domain checks for new molecules
+* RDKit-derived solvent descriptors
+* applicability-domain similarity checks
 
-This project is designed for both research use and department-facing Jupyter notebook demonstrations.
+The project supports:
+
+* original ChemFluor training
+* random-split evaluation
+* scaffold-split evaluation
+* grouped chromophore split for combined datasets
+* ChemFluor + Deep4Chem training
+* ChemFluor + Deep4Chem + FluoDB-Lite training
+* candidate generation
+* candidate screening for target wavelengths
+* candidate-screening summaries
+* Compute Canada / Nibi Slurm training
 
 ---
 
-## Data Source
+## Current Development Summary
 
-The ChemFluor dataset is publicly available on Figshare:
+### Original ChemFluor Workflow
+
+The original ChemFluor workflow evaluates both random splits and scaffold splits.
+
+Approximate best results after feature expansion and solvent descriptors:
+
+| Workflow | Split type | Main emission/wavelength MAE | Interpretation |
+|---|---:|---:|---|
+| ChemFluor-only baseline | Random split | ~22 nm | First working fluorescence predictor |
+| Improved ChemFluor workflow | Random split | ~16.7 nm | Strong interpolation performance |
+| Improved ChemFluor workflow | Scaffold split | ~31–32 nm | More realistic unseen-scaffold test |
+
+Random split performance is optimistic because similar molecules can appear in both train and test. Scaffold split is harder because molecules with the same Bemis-Murcko scaffold are kept together.
+
+### Combined Dataset Workflow
+
+The combined workflow uses a grouped split by canonical chromophore SMILES. This prevents the exact same chromophore from appearing in both training and test sets, even if it appears in multiple solvents.
+
+| Workflow | Split type | Emission MAE | Interpretation |
+|---|---:|---:|---|
+| ChemFluor + Deep4Chem | Grouped by chromophore | ~31.4 nm | Larger chemical space made prediction harder |
+| ChemFluor + Deep4Chem + FluoDB-Lite | Grouped by chromophore | **23.4 nm** | FluoDB-Lite improved broad chemical-space prediction |
+| FluoDB-expanded red/NIR region | Wavelength-region analysis | **39.2 nm** | Red/NIR remains the hardest region |
+
+Current FluoDB-expanded Random Forest model metrics:
+
+```text
+absorption_nm MAE:     20.19 nm
+emission_nm MAE:       23.38 nm
+quantum_yield MAE:     0.151
+lifetime_ns MAE:       4.32 ns
+log_extinction MAE:    0.397
+```
+
+The current 600 nm candidate-screening run still ranks the best candidates around **560–564 nm**, which suggests that the next bottleneck is not only training data, but also **candidate-library coverage**. The next development step is to expand the candidate generator with more red-shifted fluorophore families such as BODIPY-like, cyanine-like, rhodamine-like, fluorescein-like, and larger donor-acceptor scaffolds.
+
+---
+
+## Data Sources
+
+### ChemFluor
+
+The original ChemFluor dataset is publicly available on Figshare:
 
 * Dataset: **ChemFluor**
 * DOI: `10.6084/m9.figshare.12110619`
@@ -54,16 +113,40 @@ The ChemFluor dataset is publicly available on Figshare:
 * License: **CC BY 4.0**
 * Authors listed on Figshare: Cheng-Wei Ju, Rizhang Liu, Bo Li, Hanzhi Bai
 
-The pipeline expects at least these columns:
+Expected path:
 
 ```text
-SMILES
-solvent
-Emission/nm
-PLQY
+data/chemfluor_data.csv
 ```
 
-The dataset file is not committed directly to this repository by default so that users download the official source version and cite it properly.
+The original workflow also supports older root-level paths:
+
+```text
+chemfluor_data.csv
+solvent_descriptors.csv
+```
+
+### Deep4Chem
+
+Deep4Chem adds a larger chromophore dataset with absorption, emission, lifetime, quantum yield, and extinction-coefficient information.
+
+Expected path:
+
+```text
+data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.csv
+```
+
+### FluoDB-Lite
+
+FluoDB-Lite is an aggregated public fluorophore dataset from the FLAME/FluoDB work. It contains fluorophore SMILES, solvent information, photophysical properties, scaffold/category labels, source labels, and references.
+
+Expected path:
+
+```text
+data/raw/fluodb/FluoDB-Lite.csv
+```
+
+Important: FluoDB-Lite includes rows sourced from datasets such as Deep4Chem and ChemFluor. It should not be blindly appended to the existing training set. The workflow first analyzes FluoDB-Lite, standardizes all datasets into a shared schema, reports overlap, removes exact duplicate measurements, and then trains from a deduplicated combined file.
 
 ---
 
@@ -75,14 +158,35 @@ ChemFluor_Project/
   NOTEBOOKS_GUIDE.md
   requirements.txt
   run_chemfluor.sh
+  run_fluodb_training.sh
   example_candidates.csv
-  solvent_descriptors.csv
+  data/
+    chemfluor_data.csv
+    solvent_descriptors.csv
+    solvent_descriptors_expanded_deep4chem.csv
+    raw/
+      deep4chem/
+        DB for chromophore_Sci_Data_rev03.csv
+      fluodb/
+        FluoDB-Lite.csv
+    processed/
+      fluodb_lite/
+        combined_deduplicated.csv
+    generated_candidates/
+      scaffold_candidates.csv
   scripts/
+    analyze_deep4chem_dataset.py
+    make_deep4chem_solvent_descriptors.py
+    analyze_fluodb_lite.py
+    prepare_fluodb_lite.py
+    train_combined_predictors.py
+    report_combined_model_results.py
+    compare_model_results.py
+    analyze_prediction_errors.py
     generate_scaffold_candidates.py
     screen_candidate_molecules.py
     summarize_candidate_screening.py
   src/
-    __init__.py
     config.py
     data.py
     features.py
@@ -93,25 +197,29 @@ ChemFluor_Project/
     train.py
     predict.py
     applicability.py
-    utils.py
-    test_prediction.py
+    chemfluor/
+      data_standardization.py
   notebooks/
-    00_project_overview.ipynb
-    01_data_and_features.ipynb
-    02_train_models.ipynb
-    03_view_results.ipynb
-    04_predict_new_molecule.ipynb
-    05_batch_prediction.ipynb
   outputs/
-    metrics/
-    plots/
-    models/
-    predictions/
-    candidate_screening/
+  models/
   tests/
-    test_applicability_domain.py
-    test_data_standardization.py
-    test_summarize_candidate_screening.py
+```
+
+Generated model files, reports, plots, Slurm logs, processed FluoDB files, and raw FluoDB files should usually remain untracked by Git.
+
+Recommended `.gitignore` entries:
+
+```gitignore
+models/
+outputs/
+*.joblib
+*.pkl
+*.pickle
+*.out
+*.err
+__pycache__/
+.pytest_cache/
+.venv/
 ```
 
 ---
@@ -119,6 +227,13 @@ ChemFluor_Project/
 ## Installation
 
 ### Local Installation
+
+Install Python 3.11
+
+```bash
+winget install Python.Python.3.11
+py -3.11 --version
+```
 
 Create and activate a virtual environment:
 
@@ -141,7 +256,9 @@ source .venv/bin/activate
 Install dependencies:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install pytest matplotlib scipy
 ```
 
 If RDKit is difficult to install with pip, use conda:
@@ -150,83 +267,39 @@ If RDKit is difficult to install with pip, use conda:
 conda install -c conda-forge rdkit
 ```
 
-### Recommended Python Version
-
-Python 3.11 is recommended.
-
+Recommended Python version: **Python 3.11**.
 This project uses scientific Python packages such as RDKit, LightGBM, XGBoost, CatBoost, scikit-learn, NumPy, and pandas. These are more reliable on stable Python versions such as 3.11.
 
 ---
 
-## Required Files
+## Required Files *No Action Needed
 
-For full training with the original ChemFluor workflow, provide:
-
-```text
-chemfluor_data.csv
-solvent_descriptors.csv
-```
-
-`chemfluor_data.csv` contains the main ChemFluor dataset.
-
-`solvent_descriptors.csv` contains auxiliary solvent-property features used by the model.
-
-The original workflow now supports both the current `data/...` layout and the older root-level layout. When no explicit path is provided, it searches in this order:
+For the original ChemFluor workflow:
 
 ```text
 data/chemfluor_data.csv
-chemfluor_data.csv
-
 data/solvent_descriptors.csv
-solvent_descriptors.csv
 ```
 
-You can also pass explicit paths:
-
-```powershell
-python -m src.train `
-  --data-path data/chemfluor_data.csv `
-  --solvent-descriptors data/solvent_descriptors.csv
-```
-
-The expanded combined ChemFluor + Deep4Chem workflow uses the `data/...` layout in its examples and scripts.
-
-Expected solvent descriptor columns:
+For the expanded ChemFluor + Deep4Chem + FluoDB-Lite workflow:
 
 ```text
-solvent
-dielectric_constant
-refractive_index
-dipole_moment
-hbond_donor
-hbond_acceptor
-polarity_ET30
+data/chemfluor_data.csv
+data/solvent_descriptors.csv
+data/solvent_descriptors_expanded_deep4chem.csv
+data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.csv
+data/raw/fluodb/FluoDB-Lite.csv
 ```
 
-If no solvent descriptor file is found in either default location, the training pipeline can create a blank template at `data/solvent_descriptors.csv` from the solvents found in the dataset. If descriptor values are partially missing, the pipeline reports the missing solvents and median-imputes the missing numeric values.
+After FluoDB-Lite preprocessing, full FluoDB-expanded training uses:
 
----
-
-## Solvent Descriptors
-
-This repository includes `data/solvent_descriptors.csv`, an auxiliary table of solvent properties used for feature generation.
-
-The table includes descriptors such as:
-
-* dielectric constant
-* refractive index
-* dipole moment
-* hydrogen-bond donor parameter
-* hydrogen-bond acceptor parameter
-* ET(30) polarity
-
-These descriptors are included to make feature generation reproducible. Values should be checked against primary or reference sources before publication-quality use, because solvent properties can depend on temperature, source, and definition.
+```text
+data/processed/fluodb_lite/combined_deduplicated.csv
+```
 
 ---
 
 ## Feature Engineering
-
-The feature matrix is built from molecular and solvent information.
 
 ### Molecular Features
 
@@ -236,21 +309,7 @@ The molecular structure is represented using:
 * MACCS keys
 * RDKit molecular descriptors
 
-RDKit descriptors include features related to:
-
-* molecular weight
-* logP
-* hydrogen bond donors and acceptors
-* topological polar surface area
-* ring count
-* rotatable bonds
-* fraction sp3 carbons
-* heavy atom count
-* aromatic rings
-* aliphatic rings
-* molecular refractivity
-* BalabanJ
-* Bertz complexity
+RDKit descriptors include molecular weight, logP, hydrogen-bond donors/acceptors, topological polar surface area, ring count, rotatable bonds, fraction sp3 carbons, heavy atom count, aromatic rings, molecular refractivity, BalabanJ, and Bertz complexity.
 
 ### Solvent Features
 
@@ -258,73 +317,11 @@ Solvent information is represented using:
 
 * one-hot encoded solvent identity
 * optional physical solvent descriptors from `solvent_descriptors.csv`
-
-The combination of molecular and solvent features allows the model to learn both structure-property relationships and solvent effects.
-
----
-
-## Target Engineering
-
-Emission wavelength is modeled in two ways.
-
-### Direct Wavelength Prediction
-
-The first approach predicts emission wavelength directly in nanometers:
-
-```text
-Emission/nm
-```
-
-### Energy-Space Prediction
-
-The second approach converts wavelength to photon energy before training:
-
-$$
-E = \frac{1240}{\lambda}
-$$
-
-where:
-
-* (E) is photon energy in electronvolts, eV
-* (\lambda) is emission wavelength in nanometers, nm
-
-After the model predicts energy, the prediction is converted back to wavelength:
-
-$$
-\lambda = \frac{1240}{E}
-$$
-
-The final error is still reported in nanometers. This formulation is useful because molecular emission is often more physically related to photon energy than to wavelength directly.
-
-### PLQY Regression
-
-PLQY is modeled two ways:
-
-* raw PLQY regression
-* logit-transformed PLQY regression
-
-The logit transform is used because PLQY is bounded between 0 and 1.
-
-### PLQY Classification
-
-PLQY is also converted into a binary bright/dim label:
-
-```text
-PLQY > 0.25  -> bright
-PLQY <= 0.25 -> dim
-```
-
-The threshold can be changed in:
-
-```text
-src/config.py
-```
+* RDKit-derived solvent descriptors in the expanded workflow
 
 ---
 
 ## Train-Test Splits
-
-The pipeline evaluates models using two splitting methods.
 
 ### Random Split
 
@@ -334,9 +331,13 @@ Random split is an 80/20 train-test split. It is useful for baseline comparison,
 
 The scaffold split uses Bemis-Murcko scaffolds. Molecules with the same scaffold are kept together so that the same scaffold does not appear in both training and test sets.
 
-The scaffold split is the more honest generalization test for new chemistry because it evaluates performance on molecular cores that the model did not see during training.
+### Grouped Chromophore Split
+
+The combined ChemFluor + Deep4Chem + FluoDB workflow uses a grouped split by canonical chromophore SMILES. This prevents the exact same chromophore from appearing in both train and test. It is stricter than a random row split but not as strict as a Bemis-Murcko scaffold split.
 
 ---
+
+# Original ChemFluor Workflow
 
 ## Models
 
@@ -346,13 +347,13 @@ The pipeline compares several machine learning models.
 
 Regression models are used for emission wavelength and PLQY value prediction:
 
-* LightGBM
-* Random Forest
-* Extra Trees
-* Gradient Boosting
-* Support Vector Regression
-* XGBoost, if installed
-* CatBoost, if installed
+- LightGBM
+- Random Forest
+- Extra Trees
+- Gradient Boosting
+- Support Vector Regression
+- XGBoost, if installed
+- CatBoost, if installed
 
 The three best regressors by validation MAE are also averaged as a simple ensemble.
 
@@ -360,11 +361,11 @@ The three best regressors by validation MAE are also averaged as a simple ensemb
 
 Classification models are used for PLQY bright/dim prediction:
 
-* LightGBM
-* Random Forest
-* Extra Trees
-* XGBoost, if installed
-* CatBoost, if installed
+- LightGBM
+- Random Forest
+- Extra Trees
+- XGBoost, if installed
+- CatBoost, if installed
 
 ---
 
@@ -374,20 +375,20 @@ Classification models are used for PLQY bright/dim prediction:
 
 Regression models are evaluated using:
 
-* MAE, mean absolute error
-* RMSE, root mean squared error
-* R², coefficient of determination
-* Spearman rank correlation
+- MAE, mean absolute error
+- RMSE, root mean squared error
+- R², coefficient of determination
+- Spearman rank correlation
 
 ### Classification Metrics
 
 Classification models are evaluated using:
 
-* accuracy
-* precision
-* recall
-* F1 score
-* confusion matrix
+- accuracy
+- precision
+- recall
+- F1 score
+- confusion matrix
 
 ---
 
@@ -409,20 +410,22 @@ python src/train.py
 
 The training pipeline will:
 
-1. load the dataset
-2. clean the data
-3. canonicalize SMILES
-4. merge duplicate molecule-solvent pairs
-5. build molecular and solvent features
-6. train models
-7. evaluate random and scaffold splits
-8. save metrics, plots, models, and metadata
+1. Load the dataset.
+2. Clean the data.
+3. Canonicalize SMILES.
+4. Merge duplicate molecule-solvent pairs.
+5. Build molecular and solvent features.
+6. Train models.
+7. Evaluate random and scaffold splits.
+8. Save metrics, plots, models, and metadata.
 
 ---
 
-## Running on Compute Canada / Nibi
+## Running Original ChemFluor Training on Compute Canada / Nibi
 
 This project was developed and tested on the Digital Research Alliance of Canada / Compute Canada Nibi cluster.
+
+This section is for training the **original ChemFluor-only workflow**, not the expanded ChemFluor + Deep4Chem + FluoDB workflow.
 
 ### 1. Log in to Nibi
 
@@ -480,20 +483,27 @@ ChemFluor_Project/
 RDKit should be loaded through the Nibi module system rather than installed with pip:
 
 ```bash
+module purge
 module load python/3.11
 module load gcc
 module load rdkit
 ```
 
-### 5. Create and Activate the Python Environment
-
-If the environment does not exist yet:
+Check the Python version:
 
 ```bash
-python -m venv ~/scratch/chemfluor_env
+python --version
+```
+
+### 5. Create and Activate the Python Environment
+
+If the environment does not exist yet, create it with system site packages so the virtual environment can see module-provided RDKit:
+
+```bash
+python -m venv --system-site-packages ~/scratch/chemfluor_env
 source ~/scratch/chemfluor_env/bin/activate
 python -m pip install --upgrade pip setuptools wheel
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 If the environment already exists:
@@ -508,6 +518,8 @@ Check that RDKit and the machine learning packages work:
 python -c "from rdkit import Chem; print(Chem.MolFromSmiles('CCO'))"
 python -c "import lightgbm, xgboost, catboost; print('ML packages ready')"
 ```
+
+If optional packages such as XGBoost or CatBoost are not installed, the pipeline can still run with the installed models.
 
 ### 6. Submit the Training Job
 
@@ -535,6 +547,12 @@ Example:
 
 ```bash
 tail -f outputs/chemfluor_15656967.out
+```
+
+To exit `tail` without cancelling the job:
+
+```text
+Ctrl + C
 ```
 
 ### 7. View Saved Outputs
@@ -626,11 +644,11 @@ outputs/predictions/*.csv
 
 Plots include:
 
-* predicted vs actual wavelength
-* predicted vs actual PLQY
-* residual plots
-* error by solvent
-* PLQY classifier confusion matrix
+- predicted vs actual wavelength
+- predicted vs actual PLQY
+- residual plots
+- error by solvent
+- PLQY classifier confusion matrix
 
 ---
 
@@ -677,275 +695,37 @@ python -m src.predict \
   --csv example_candidates.csv \
   --save-csv outputs/predictions/batch_predictions.csv
 ```
-
 ---
 
-## Applicability Domain and Confidence Warnings
-
-The prediction command reports whether a new molecule is similar to the training data.
-
-It checks:
-
-* maximum Morgan fingerprint Tanimoto similarity to training molecules
-* average similarity to the five nearest training molecules
-* whether the Bemis-Murcko scaffold was seen during training
-* whether the solvent was seen during training
-* optional prediction uncertainty from seed ensemble models
-
-Confidence levels:
-
-### High Confidence
-
-The molecule is close to the training domain.
-
-Typical conditions:
-
-* scaffold was seen during training
-* maximum Tanimoto similarity is at least 0.60
-* solvent was seen during training
-
-### Medium Confidence
-
-The molecule is moderately similar to training examples.
-
-Typical conditions:
-
-* maximum Tanimoto similarity is at least 0.40
-* solvent was seen during training
-* scaffold may be new
-
-### Low Confidence
-
-The molecule is outside or weakly supported by the training domain.
-
-Possible reasons:
-
-* low similarity to training molecules
-* unseen scaffold
-* unknown solvent
-* missing or imputed solvent descriptors
-* high model uncertainty
-
-Low-confidence predictions should be treated as rough screening estimates, not definitive experimental predictions.
-
----
-
-## Jupyter Notebooks
-
-The `notebooks/` folder provides department-facing notebooks.
-
-Recommended order:
-
-1. `00_project_overview.ipynb`
-2. `03_view_results.ipynb`
-3. `04_predict_new_molecule.ipynb`
-4. `05_batch_prediction.ipynb`
-
-Technical users may also use:
-
-1. `01_data_and_features.ipynb`
-2. `02_train_models.ipynb`
-
-### Notebook Descriptions
-
-#### `00_project_overview.ipynb`
-
-Explains:
-
-* project goal
-* inputs and outputs
-* dataset source
-* feature engineering
-* random split vs scaffold split
-* prediction and confidence warnings
-
-#### `01_data_and_features.ipynb`
-
-Demonstrates:
-
-* loading the raw dataset
-* cleaning the data
-* canonicalizing SMILES
-* building the feature matrix
-* showing feature matrix shape
-
-#### `02_train_models.ipynb`
-
-Shows how to:
-
-* submit the Slurm training job
-* check job status
-* inspect output logs
-
-This notebook should submit the Slurm job rather than train directly inside the notebook.
-
-#### `03_view_results.ipynb`
-
-Displays:
-
-* metrics CSV
-* random split results
-* scaffold split results
-* predicted-vs-actual plots
-* residual plots
-* confusion matrix
-* worst prediction tables
-
-#### `04_predict_new_molecule.ipynb`
-
-Allows users to enter:
-
-* SMILES
-* solvent
-* candidate name
-
-Then it runs a prediction and reports:
-
-* predicted emission wavelength
-* predicted PLQY
-* bright/dim prediction
-* confidence level
-* nearest training molecules
-* Tanimoto similarity
-* scaffold seen or unseen
-* solvent seen or unseen
-
-#### `05_batch_prediction.ipynb`
-
-Allows users to predict multiple molecules from a CSV file.
-
----
-
-## Example Candidate File
-
-This repository includes:
-
-```text
-example_candidates.csv
-```
-
-Example contents:
-
-```csv
-name,SMILES,solvent
-benzene_example,c1ccccc1,MeCN
-ethanol_example,CCO,MeOH
-triethylamine_example,CCN(CC)CC,MeCN
-```
-
-Use it with:
-
-```bash
-python -m src.predict \
-  --csv example_candidates.csv \
-  --save-csv outputs/predictions/batch_predictions.csv
-```
-
----
-
-## Current Best Results
-
-After adding solvent descriptors and testing XGBoost/CatBoost, the strongest clean results were approximately:
-
-### Random Split
-
-```text
-Best wavelength MAE: 16.67 nm
-Best PLQY MAE: 0.1233
-Best PLQY classifier: 83.99% accuracy / 0.853 F1
-```
-
-### Scaffold Split
-
-```text
-Best wavelength MAE: 31.62 nm
-Best PLQY MAE: 0.2116
-Best PLQY classifier: 76.95% accuracy / 0.812 F1
-```
-
-The random split results show strong interpolation performance. The scaffold split results are more realistic for new molecular families and show that scaffold generalization remains the main challenge.
-
----
-
-## Known Limitations
-
-* PLQY is experimentally noisy and difficult to predict.
-* Solvent descriptor values should be verified before publication-quality use.
-* Random split can overestimate performance when similar molecules appear in train and test.
-* Scaffold split is a better estimate of performance on new molecular cores.
-* The dataset is modest for deep learning, so classical ML baselines remain important.
-* Predictions for low-similarity molecules should be treated as rough estimates.
-
----
-
-## Citation
-
-If using this project, cite the original ChemFluor dataset and paper.
-
-Dataset:
-
-```text
-ChemFluor. Figshare. DOI: 10.6084/m9.figshare.12110619
-```
-
-Original paper:
-
-```text
-Ju, C.-W.; Bai, H.; Li, B.; Liu, R. Machine Learning Enables Highly Accurate Predictions of Photophysical Properties of Organic Fluorescent Materials: Emission Wavelengths and Quantum Yields. Journal of Chemical Information and Modeling, 2021.
-```
-
----
-
-# Combined ChemFluor + Deep4Chem Workflow
-
-This section describes the expanded ChemFluor workflow for combining the original ChemFluor dataset with the Deep4Chem chromophore dataset, training solvent-aware prediction models, and running first-pass candidate screening for target fluorescence wavelengths.
-
-The expanded workflow supports:
-
-```text
-molecule + solvent → predicted optical properties
-```
-
-and an early inverse-design workflow:
-
-```text
-target emission + solvent + candidate molecules → ranked candidate fluorophores
-```
-
-This is not full neural molecular generation yet. The current candidate-generation step uses rule-based scaffold enumeration, then the trained model ranks the generated candidates.
-
----
+# Expanded ChemFluor + Deep4Chem + FluoDB-Lite Workflow
 
 ## Workflow Overview
 
-The complete command-line workflow is:
+The full expanded workflow is:
 
 ```text
-1. Analyze the Deep4Chem dataset
+1. Analyze Deep4Chem
 2. Build expanded solvent descriptors
-3. Train combined ChemFluor + Deep4Chem models
-4. Generate model reports and diagnostic plots
-5. Compare model types
-6. Analyze prediction errors
-7. Generate scaffold-based candidate molecules
-8. Screen candidates for target emission wavelengths
-9. Summarize candidate screening results
+3. Analyze FluoDB-Lite
+4. Prepare and deduplicate ChemFluor + Deep4Chem + FluoDB-Lite
+5. Train combined models
+6. Generate model reports
+7. Analyze prediction errors
+8. Generate scaffold-based candidate molecules
+9. Screen candidates for target emission wavelengths
+10. Summarize candidate-screening results
 ```
-
-Generated model files, prediction outputs, plots, and reports should remain local and should not be committed to GitHub.
 
 ---
 
-## 1. Analyze the Deep4Chem Dataset
-
-This script inspects the raw Deep4Chem chromophore dataset. It reports dataset size, missing values, target coverage, common solvents, invalid solvent labels, and SMILES validity.
+## 1. Analyze Deep4Chem
 
 ```powershell
 python scripts/analyze_deep4chem_dataset.py `
   --input "data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.csv"
 ```
 
-Default output directory:
+Default output:
 
 ```text
 outputs/deep4chem_analysis/
@@ -965,8 +745,6 @@ invalid_solvents.csv
 
 ## 2. Build Expanded Solvent Descriptors
 
-This script creates an expanded solvent descriptor table for the Deep4Chem solvents. It extracts unique solvents, validates solvent SMILES with RDKit, computes RDKit solvent descriptors, and merges any existing physical solvent descriptors.
-
 ```powershell
 python scripts/make_deep4chem_solvent_descriptors.py `
   --deep4chem "data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.csv" `
@@ -984,78 +762,11 @@ python scripts/make_deep4chem_solvent_descriptors.py `
   --report outputs/deep4chem_analysis/solvent_descriptor_report.txt
 ```
 
-The resulting solvent descriptor CSV is used during model training and candidate screening.
-
 ---
 
-## 3. Train Combined ChemFluor + Deep4Chem Models
+## 3. Analyze FluoDB-Lite
 
-This script standardizes the original ChemFluor dataset and Deep4Chem dataset into one common schema, merges solvent descriptors, generates Morgan fingerprints, and trains one model per target property.
-
-Targets:
-
-```text
-absorption_nm
-emission_nm
-lifetime_ns
-quantum_yield
-log_extinction
-```
-
-The train/test split is grouped by canonical chromophore SMILES. This means the same chromophore is not allowed to appear in both the train and test sets, giving a more realistic estimate of generalization to unseen molecules.
-
-### Train Random Forest Models
-
-```powershell
-python scripts/train_combined_predictors.py `
-  --deep4chem "data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.csv" `
-  --chemfluor data/chemfluor_data.csv `
-  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv `
-  --out-dir models/chemfluor_combined `
-  --model rf
-```
-
-### Train HistGradientBoosting Models
-
-```powershell
-python scripts/train_combined_predictors.py `
-  --deep4chem "data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.csv" `
-  --chemfluor data/chemfluor_data.csv `
-  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv `
-  --out-dir models/chemfluor_combined_histgb `
-  --model histgb
-```
-
-Useful options:
-
-```powershell
---n-bits 2048
---radius 2
---standardized-combined data/processed/fluodb_lite/combined_deduplicated.csv
-```
-
-Model outputs are saved under the chosen model directory, including:
-
-```text
-metrics.json
-feature_metadata.json
-predictions_absorption_nm.csv
-predictions_emission_nm.csv
-predictions_lifetime_ns.csv
-predictions_quantum_yield.csv
-predictions_log_extinction.csv
-*_rf.joblib or *_histgb.joblib
-```
-
-These outputs are generated artifacts and should not be committed to GitHub.
-
----
-
-## Optional FluoDB-Lite Integration
-
-FluoDB-Lite is an aggregated public fluorophore dataset. Because it includes rows from sources such as Deep4Chem and ChemFluor, it should not be blindly appended to the current training data. The workflow first analyzes FluoDB-Lite, then standardizes it into the shared schema, reports overlap, removes exact measurement duplicates with source priority, and only then uses the deduplicated file for training.
-
-Analyze the raw FluoDB-Lite file:
+Analyze the raw FluoDB-Lite file before adding it to the combined training data:
 
 ```powershell
 python scripts/analyze_fluodb_lite.py `
@@ -1063,7 +774,21 @@ python scripts/analyze_fluodb_lite.py `
   --out-dir outputs/fluodb_lite_analysis
 ```
 
-Prepare standardized and deduplicated files:
+Important outputs:
+
+```text
+outputs/fluodb_lite_analysis/fluodb_lite_summary.txt
+outputs/fluodb_lite_analysis/source_counts.csv
+outputs/fluodb_lite_analysis/scaffold_counts.csv
+outputs/fluodb_lite_analysis/top_red_scaffolds_ge600.csv
+outputs/fluodb_lite_analysis/top_red_sources_ge600.csv
+```
+
+Use these files to inspect target coverage, source overlap, scaffold distribution, and red/orange/NIR representation.
+
+---
+
+## 4. Prepare and Deduplicate FluoDB-Lite
 
 ```powershell
 python scripts/prepare_fluodb_lite.py `
@@ -1073,7 +798,7 @@ python scripts/prepare_fluodb_lite.py `
   --out-dir data/processed/fluodb_lite
 ```
 
-Generated preparation outputs include:
+Generated outputs:
 
 ```text
 data/processed/fluodb_lite/chemfluor_standardized.csv
@@ -1087,7 +812,32 @@ data/processed/fluodb_lite/red_region_summary.csv
 data/processed/fluodb_lite/molecule_solvent_replicates.csv
 ```
 
-Train from the deduplicated standardized file:
+Exact duplicate measurements are defined as rows with the same canonical chromophore SMILES, canonical solvent SMILES, absorption, emission, quantum yield, and log extinction. Source priority is:
+
+```text
+ChemFluor first
+Deep4Chem second
+FluoDB-Lite third
+```
+
+Molecule-solvent pairs with different reported values are reported as replicates rather than collapsed automatically.
+
+---
+
+## 5. Train Combined Models Locally
+
+### ChemFluor + Deep4Chem
+
+```powershell
+python scripts/train_combined_predictors.py `
+  --deep4chem "data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.csv" `
+  --chemfluor data/chemfluor_data.csv `
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv `
+  --out-dir models/chemfluor_combined `
+  --model rf
+```
+
+### ChemFluor + Deep4Chem + FluoDB-Lite
 
 ```powershell
 python scripts/train_combined_predictors.py `
@@ -1097,99 +847,488 @@ python scripts/train_combined_predictors.py `
   --model rf
 ```
 
-Exact duplicate measurements are defined as rows with the same canonical chromophore SMILES, canonical solvent SMILES, absorption, emission, quantum yield, and log extinction. Source priority is ChemFluor first, Deep4Chem second, and FluoDB-Lite third. Molecule-solvent pairs with different reported values are reported as replicates rather than collapsed automatically.
+The FluoDB-expanded dataset is large. Local training can slow down a laptop, so full training is recommended on Compute Canada / Nibi.
 
-Processed FluoDB-Lite files and analysis reports are generated artifacts and should not be committed unless intentionally curated for the project.
+Useful options:
+
+```text
+--model rf
+--model histgb
+--n-bits 2048
+--radius 2
+--standardized-combined data/processed/fluodb_lite/combined_deduplicated.csv
+```
+
+Model outputs include:
+
+```text
+metrics.json
+feature_metadata.json
+combined_standardized_training_rows.csv
+combined_modeling_rows_after_feature_merge.csv
+predictions_absorption_nm.csv
+predictions_emission_nm.csv
+predictions_lifetime_ns.csv
+predictions_quantum_yield.csv
+predictions_log_extinction.csv
+*_rf.joblib or *_histgb.joblib
+```
+
+These outputs are generated artifacts and should not be committed to GitHub.
 
 ---
 
-## 4. Generate a Model Report
+# Transferring Prepared Data to Compute Canada / Nibi
 
-This script creates a professor-ready model summary, metrics table, and diagnostic plots.
+After analyzing and preparing the datasets locally, move the large training job to Compute Canada / Nibi.
+
+Recommended workflow:
+
+```text
+1. Analyze and prepare datasets locally.
+2. Commit/push only source code and documentation to GitHub.
+3. Clone or pull the GitHub repo on Nibi.
+4. Transfer only required data files from the local machine to Nibi.
+5. Train the model on Nibi with Slurm.
+6. Copy selected trained results back to the local machine if needed.
+```
+
+Do not commit generated model folders, reports, raw FluoDB, or processed FluoDB artifacts unless intentionally archiving a release.
+
+---
+
+## Files Needed on Nibi
+
+Different training modes require different files.
+
+### Original ChemFluor-only training
+
+For the original ChemFluor workflow on Nibi, only these files are required:
+
+```text
+data/chemfluor_data.csv
+data/solvent_descriptors.csv
+```
+
+This mode runs the original `src.train` pipeline, evaluates random and scaffold splits, and writes outputs under `outputs/`.
+
+### ChemFluor + Deep4Chem training
+
+For combined ChemFluor + Deep4Chem training on Nibi, these files are required:
+
+```text
+data/chemfluor_data.csv
+data/solvent_descriptors.csv
+data/solvent_descriptors_expanded_deep4chem.csv
+data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.csv
+```
+
+### ChemFluor + Deep4Chem + FluoDB-Lite training
+
+For FluoDB-expanded training on Nibi, these files should exist:
+
+```text
+data/chemfluor_data.csv
+data/solvent_descriptors.csv
+data/solvent_descriptors_expanded_deep4chem.csv
+data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.csv
+data/raw/fluodb/FluoDB-Lite.csv
+data/processed/fluodb_lite/combined_deduplicated.csv
+```
+
+The most important training input for the FluoDB-expanded model is:
+
+```text
+data/processed/fluodb_lite/combined_deduplicated.csv
+```
+
+If this file already exists locally after analysis/preparation, it can be transferred directly to Nibi rather than regenerated there.
+
+---
+
+## Transfer from Windows to Nibi
+
+Run these commands from **Windows PowerShell**, not from the Nibi terminal.
+
+Go to the local project folder:
 
 ```powershell
-python scripts/report_combined_model_results.py `
-  --model-dir models/chemfluor_combined `
-  --out-dir outputs/combined_model_report
+cd "C:\Users\CL\OneDrive\Desktop\python\ChemFluor_Project"
+```
+
+Transfer the full local `data/` folder:
+
+```powershell
+scp -r data chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/
+```
+
+Or transfer only specific files/folders:
+
+```powershell
+scp data/chemfluor_data.csv chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/data/
+scp data/solvent_descriptors.csv chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/data/
+scp data/solvent_descriptors_expanded_deep4chem.csv chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/data/
+scp -r data/raw/deep4chem chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/data/raw/
+scp -r data/raw/fluodb chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/data/raw/
+scp -r data/processed/fluodb_lite chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/data/processed/
+```
+
+If the destination directories do not exist yet, create them on Nibi first:
+
+```bash
+cd ~/scratch/ChemFluor_Project_git
+mkdir -p data/raw/deep4chem
+mkdir -p data/raw/fluodb
+mkdir -p data/processed/fluodb_lite
+```
+
+---
+
+## Verify Files on Nibi
+
+Log in:
+
+```bash
+ssh chrisl@nibi.alliancecan.ca
+```
+
+Go to the project:
+
+```bash
+cd ~/scratch/ChemFluor_Project_git
+```
+
+Verify original ChemFluor-only files:
+
+```bash
+ls -lh data/chemfluor_data.csv
+ls -lh data/solvent_descriptors.csv
+```
+
+Verify expanded workflow files, if using Deep4Chem or FluoDB-Lite:
+
+```bash
+ls -lh data/solvent_descriptors_expanded_deep4chem.csv
+ls -lh "data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.csv"
+ls -lh data/raw/fluodb/FluoDB-Lite.csv
+ls -lh data/processed/fluodb_lite/combined_deduplicated.csv
+```
+
+---
+
+## Pull Latest Code on Nibi
+
+If the repo already exists on Nibi:
+
+```bash
+cd ~/scratch/ChemFluor_Project_git
+git pull origin main
+```
+
+If setting up for the first time:
+
+```bash
+cd ~/scratch
+git clone https://github.com/chrislleung/ChemFluor.git ChemFluor_Project_git
+cd ChemFluor_Project_git
+```
+
+---
+
+# Compute Canada / Nibi Training
+
+## Environment Setup
+
+Load Nibi modules and activate the virtual environment:
+
+```bash
+cd ~/scratch/ChemFluor_Project_git
+
+module purge
+module load python/3.11
+module load gcc
+module load rdkit
+
+source ~/scratch/chemfluor_env/bin/activate
+```
+
+Confirm RDKit works:
+
+```bash
+python -c "from rdkit import Chem; print('RDKit OK:', Chem.MolFromSmiles('CCO'))"
+```
+
+Run tests:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests
+```
+
+If packages are missing:
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install pytest typing_extensions matplotlib scipy
+```
+
+If RDKit works outside the virtual environment but not inside it, recreate the environment with system site packages:
+
+```bash
+cd ~/scratch
+mv chemfluor_env chemfluor_env_old
+
+module purge
+module load python/3.11
+module load gcc
+module load rdkit
+
+python -m venv --system-site-packages ~/scratch/chemfluor_env
+source ~/scratch/chemfluor_env/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r ~/scratch/ChemFluor_Project_git/requirements.txt
+python -m pip install pytest typing_extensions matplotlib scipy
+```
+
+---
+
+
+  ## Slurm Training Script for Combined ChemFluor + Deep4Chem Model
+
+Use this section when you want to train the combined ChemFluor + Deep4Chem model on Nibi, but not the FluoDB-expanded model. This requires:
+
+```text
+data/chemfluor_data.csv
+data/solvent_descriptors_expanded_deep4chem.csv
+data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.csv
+```
+
+Create a script such as `run_combined_training.sh` (skip if already in directory):
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=chemfluor_combined
+#SBATCH --time=06:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#SBATCH --output=outputs/combined_train_%j.out
+#SBATCH --error=outputs/combined_train_%j.err
+
+set -euo pipefail
+
+cd ~/scratch/ChemFluor_Project_git
+
+module purge
+module load python/3.11
+module load gcc
+module load rdkit
+
+source ~/scratch/chemfluor_env/bin/activate
+
+mkdir -p outputs
+mkdir -p models/chemfluor_combined
+
+echo "Starting ChemFluor + Deep4Chem training at $(date)"
+python -c "from rdkit import Chem; print('RDKit OK:', Chem.MolFromSmiles('CCO'))"
+
+python -u scripts/train_combined_predictors.py \
+  --deep4chem "data/raw/deep4chem/DB for chromophore_Sci_Data_rev03.csv" \
+  --chemfluor data/chemfluor_data.csv \
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
+  --out-dir models/chemfluor_combined \
+  --model rf
+
+echo "ChemFluor + Deep4Chem training finished at $(date)"
+find models/chemfluor_combined -maxdepth 1 -type f -printf "%f\n" | sort
+```
+
+Submit and monitor:
+
+```bash
+chmod +x run_combined_training.sh
+sbatch run_combined_training.sh
+squeue -u $USER
+tail -f outputs/combined_train_<JOBID>.out
+```
+
+---
+
+## Slurm Training Script for FluoDB-Expanded Model
+
+Create a script (skip if already in directory):
+
+```bash
+nano run_fluodb_training.sh
+```
+
+Paste:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=chemfluor_fluodb
+#SBATCH --time=08:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --output=outputs/fluodb_train_%j.out
+#SBATCH --error=outputs/fluodb_train_%j.err
+
+set -euo pipefail
+
+cd ~/scratch/ChemFluor_Project_git
+
+module purge
+module load python/3.11
+module load gcc
+module load rdkit
+
+source ~/scratch/chemfluor_env/bin/activate
+
+mkdir -p outputs
+mkdir -p models/chemfluor_combined_fluodb
+
+echo "Starting FluoDB combined training at $(date)"
+echo "Working directory: $(pwd)"
+echo "Python: $(which python)"
+python --version
+
+echo "Checking RDKit..."
+python -c "from rdkit import Chem; print('RDKit OK:', Chem.MolFromSmiles('CCO'))"
+
+echo "Checking input files..."
+ls -lh data/processed/fluodb_lite/combined_deduplicated.csv
+ls -lh data/solvent_descriptors_expanded_deep4chem.csv
+
+echo "Running training..."
+python -u scripts/train_combined_predictors.py \
+  --standardized-combined data/processed/fluodb_lite/combined_deduplicated.csv \
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
+  --out-dir models/chemfluor_combined_fluodb \
+  --model rf
+
+echo "Training finished at $(date)"
+find models/chemfluor_combined_fluodb -maxdepth 1 -type f -printf "%f\n" | sort
+```
+
+If your allocation requires an account line, copy it from your existing script:
+
+```bash
+grep account run_chemfluor.sh
+```
+
+Then add the same `#SBATCH --account=...` line near the top of `run_fluodb_training.sh`.
+
+Submit:
+
+```bash
+chmod +x run_fluodb_training.sh
+sbatch run_fluodb_training.sh
+```
+
+Monitor:
+
+```bash
+squeue -u $USER
+tail -f outputs/fluodb_train_<JOBID>.out
+tail -f outputs/fluodb_train_<JOBID>.err
+```
+
+To exit `tail` without stopping the job:
+
+```text
+Ctrl + C
+```
+
+To cancel a job:
+
+```bash
+scancel <JOBID>
+```
+
+---
+
+## Copy Trained Results Back to Local Machine
+
+After training finishes, copy selected results back from Nibi to the local machine.
+
+Run these from Windows PowerShell:
+
+```powershell
+cd "C:\Users\CL\OneDrive\Desktop\python\ChemFluor_Project_synced"
+```
+
+Copy the original ChemFluor workflow outputs, if you trained the original dataset:
+
+```powershell
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/metrics outputs/
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/plots outputs/
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/models outputs/
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/predictions outputs/
+```
+
+Copy the combined or FluoDB-expanded trained model folder, if needed:
+
+```powershell
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/models/chemfluor_combined models/
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/models/chemfluor_combined_fluodb models/
+```
+
+Copy model reports:
+
+```powershell
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/combined_model_report_fluodb outputs/
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/error_analysis_fluodb outputs/
+```
+
+Copy candidate-screening outputs if needed:
+
+```powershell
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/candidate_screening outputs/
+```
+
+These copied files are useful for local inspection and reporting, but they should usually remain untracked by Git.
+
+---
+
+# Reporting and Error Analysis
+
+Generate a model report:
+
+```bash
+python scripts/report_combined_model_results.py \
+  --model-dir models/chemfluor_combined_fluodb \
+  --out-dir outputs/combined_model_report_fluodb
 ```
 
 Generated outputs:
 
 ```text
-outputs/combined_model_report/model_summary.md
-outputs/combined_model_report/metrics_table.csv
-outputs/combined_model_report/figures/
+outputs/combined_model_report_fluodb/model_summary.md
+outputs/combined_model_report_fluodb/metrics_table.csv
+outputs/combined_model_report_fluodb/figures/
 ```
 
-Each target gets:
+Analyze prediction errors:
 
-```text
-predicted vs actual plot
-residual histogram
-residual vs predicted plot
+```bash
+python scripts/analyze_prediction_errors.py \
+  --model-dir models/chemfluor_combined_fluodb \
+  --out-dir outputs/error_analysis_fluodb
 ```
+
+Check wavelength-region error:
+
+```bash
+cat outputs/error_analysis_fluodb/error_by_wavelength_region_emission_nm.csv
+```
+
+The current FluoDB-expanded run showed that red/NIR remains the hardest emission region.
 
 ---
 
-## 5. Compare Random Forest vs HistGradientBoosting
+# Candidate Generation and Screening
 
-After training both model types, compare them:
+## Generate Scaffold-Based Candidates
 
-```powershell
-python scripts/compare_model_results.py `
-  --rf-dir models/chemfluor_combined `
-  --histgb-dir models/chemfluor_combined_histgb `
-  --out-dir outputs/model_comparison_report
-```
-
-Generated outputs:
-
-```text
-outputs/model_comparison_report/model_comparison.csv
-outputs/model_comparison_report/model_comparison.md
-outputs/model_comparison_report/mae_comparison.png
-outputs/model_comparison_report/rmse_comparison.png
-outputs/model_comparison_report/r2_comparison.png
-```
-
-The current main baseline is Random Forest because it gives the strongest MAE profile overall, while HistGradientBoosting remains useful as a comparison model.
-
----
-
-## 6. Analyze Prediction Errors
-
-This script identifies where the model performs best and worst. It saves best/worst predictions, error summaries by source dataset, top-error solvents, and wavelength-region summaries for absorption/emission.
-
-```powershell
-python scripts/analyze_prediction_errors.py `
-  --model-dir models/chemfluor_combined `
-  --out-dir outputs/error_analysis
-```
-
-Generated outputs include:
-
-```text
-overall_error_summary.csv
-error_analysis_report.md
-worst_predictions_<target>.csv
-best_predictions_<target>.csv
-error_by_source_dataset_<target>.csv
-top_error_solvents_<target>.csv
-error_by_wavelength_region_absorption_nm.csv
-error_by_wavelength_region_emission_nm.csv
-```
-
-Use this step to understand where the model is less reliable, such as unusual solvents, rare chromophore classes, or red/NIR wavelength regions.
-
----
-
-## 7. Generate Scaffold-Based Candidate Molecules
-
-This script performs rule-based scaffold enumeration. It is not neural molecular generation.
-
-It combines predefined coumarin-like and naphthalimide-like scaffold templates with substituent fragments, validates the molecules with RDKit, removes duplicates, and saves the candidate library.
-
-```powershell
+```bash
 python scripts/generate_scaffold_candidates.py
 ```
 
@@ -1199,149 +1338,33 @@ Default output:
 data/generated_candidates/scaffold_candidates.csv
 ```
 
-Expected default run summary:
+Current default generator:
 
 ```text
 Scaffold templates used: 5
 Substituents used: 12
 Raw combinations attempted: 60
 Unique valid molecules saved: 59
-Saved candidates to: data/generated_candidates/scaffold_candidates.csv
 ```
 
-Choose only coumarin candidates:
-
-```powershell
-python scripts/generate_scaffold_candidates.py `
-  --scaffolds coumarin `
-  --out data/generated_candidates/coumarin_candidates.csv
-```
-
-Choose only naphthalimide candidates:
-
-```powershell
-python scripts/generate_scaffold_candidates.py `
-  --scaffolds naphthalimide `
-  --out data/generated_candidates/naphthalimide_candidates.csv
-```
-
-Choose custom substituents:
-
-```powershell
-python scripts/generate_scaffold_candidates.py `
-  --scaffolds all `
-  --substituents cyano,methoxy,diethylamino,phenyl `
-  --out data/generated_candidates/custom_candidates.csv
-```
-
-Candidate output columns:
-
-```text
-name
-scaffold
-substituent
-smiles
-canonical_smiles
-```
+The current scaffold set is mainly coumarin-like and naphthalimide-like. This is useful for testing but does not yet cover enough red-shifted fluorophore families.
 
 ---
 
-## 8. Screen Candidate Molecules
+## Screen Candidate Molecules
 
-This script scores and ranks candidate molecules using trained ChemFluor models.
+Example: screen for 600 nm emission in ethanol using the FluoDB-trained model.
 
-Inputs:
-
-```text
-candidate molecule CSV
-solvent SMILES
-target emission wavelength
-trained model directory
-solvent descriptor CSV
-```
-
-The screening script predicts:
-
-```text
-predicted_absorption_nm
-predicted_emission_nm
-predicted_quantum_yield
-predicted_log_extinction
-```
-
-and ranks candidates using a score that rewards closeness to the target emission wavelength and higher predicted quantum yield.
-
-The screening script can also add applicability-domain warning columns using Morgan fingerprint Tanimoto similarity to the closest reference chromophore from the model directory:
-
-```text
-nearest_training_similarity
-nearest_training_smiles
-outside_applicability_domain
-```
-
-`nearest_training_similarity` is the maximum Tanimoto similarity to any reference chromophore. `outside_applicability_domain=True` means the candidate is below the selected similarity threshold and should be treated as a lower-confidence model extrapolation. This warning does not experimentally validate or invalidate a candidate; it only indicates whether the candidate is chemically close to molecules used as the model reference set.
-
-By default, the script tries to use:
-
-```text
-models/chemfluor_combined/combined_modeling_rows_after_feature_merge.csv
-```
-
-That file contains all post-feature-merge modeling rows. The current training script does not save row-level train/test split membership, so the applicability reference set may include both training and held-out chromophores. If no reference CSV is found, screening continues and prints a warning.
-
-### Screen for 450 nm emission in ethanol
-
-```powershell
-python scripts/screen_candidate_molecules.py `
-  --candidates data/generated_candidates/scaffold_candidates.csv `
-  --solvent-smiles CCO `
-  --target-emission 450 `
-  --model-dir models/chemfluor_combined `
-  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv `
-  --applicability-reference-csv models/chemfluor_combined/combined_modeling_rows_after_feature_merge.csv `
-  --applicability-threshold 0.30 `
-  --out outputs/candidate_screening/ranked_scaffold_candidates_ethanol_450.csv
-```
-
-### Screen for 520 nm emission in ethanol
-
-```powershell
-python scripts/screen_candidate_molecules.py `
-  --candidates data/generated_candidates/scaffold_candidates.csv `
-  --solvent-smiles CCO `
-  --target-emission 520 `
-  --model-dir models/chemfluor_combined `
-  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv `
-  --applicability-reference-csv models/chemfluor_combined/combined_modeling_rows_after_feature_merge.csv `
-  --applicability-threshold 0.30 `
-  --out outputs/candidate_screening/ranked_scaffold_candidates_ethanol_520.csv
-```
-
-### Screen for 600 nm emission in ethanol
-
-```powershell
-python scripts/screen_candidate_molecules.py `
-  --candidates data/generated_candidates/scaffold_candidates.csv `
-  --solvent-smiles CCO `
-  --target-emission 600 `
-  --model-dir models/chemfluor_combined `
-  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv `
-  --applicability-reference-csv models/chemfluor_combined/combined_modeling_rows_after_feature_merge.csv `
-  --applicability-threshold 0.30 `
-  --out outputs/candidate_screening/ranked_scaffold_candidates_ethanol_600.csv
-```
-
-To disable applicability-domain scoring:
-
-```powershell
-python scripts/screen_candidate_molecules.py `
-  --candidates data/generated_candidates/scaffold_candidates.csv `
-  --solvent-smiles CCO `
-  --target-emission 600 `
-  --model-dir models/chemfluor_combined `
-  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv `
-  --no-applicability-domain `
-  --out outputs/candidate_screening/ranked_scaffold_candidates_ethanol_600.csv
+```bash
+python scripts/screen_candidate_molecules.py \
+  --candidates data/generated_candidates/scaffold_candidates.csv \
+  --solvent-smiles CCO \
+  --target-emission 600 \
+  --model-dir models/chemfluor_combined_fluodb \
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
+  --applicability-reference-csv models/chemfluor_combined_fluodb/combined_modeling_rows_after_feature_merge.csv \
+  --applicability-threshold 0.30 \
+  --out outputs/candidate_screening/ranked_scaffold_candidates_ethanol_600_fluodb.csv
 ```
 
 Ranked output columns:
@@ -1365,161 +1388,293 @@ score
 estimated_brightness_score
 ```
 
+Applicability-domain columns use Morgan fingerprint Tanimoto similarity to the closest reference chromophore.
+
 ---
 
-## 9. Summarize Candidate Screening Results
+## Screen 450, 520, and 600 nm Targets
 
-This script combines multiple ranked candidate-screening CSV files into a single top-N table and a concise Markdown report.
+```bash
+python scripts/screen_candidate_molecules.py \
+  --candidates data/generated_candidates/scaffold_candidates.csv \
+  --solvent-smiles CCO \
+  --target-emission 450 \
+  --model-dir models/chemfluor_combined_fluodb \
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
+  --applicability-reference-csv models/chemfluor_combined_fluodb/combined_modeling_rows_after_feature_merge.csv \
+  --applicability-threshold 0.30 \
+  --out outputs/candidate_screening/ranked_scaffold_candidates_ethanol_450_fluodb.csv
 
-It preserves the ranking order from each screening file, adds the target emission wavelength and rank, summarizes the best candidate for each target, and reports scaffold/substituent counts among the top candidates.
+python scripts/screen_candidate_molecules.py \
+  --candidates data/generated_candidates/scaffold_candidates.csv \
+  --solvent-smiles CCO \
+  --target-emission 520 \
+  --model-dir models/chemfluor_combined_fluodb \
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
+  --applicability-reference-csv models/chemfluor_combined_fluodb/combined_modeling_rows_after_feature_merge.csv \
+  --applicability-threshold 0.30 \
+  --out outputs/candidate_screening/ranked_scaffold_candidates_ethanol_520_fluodb.csv
 
-```powershell
-python scripts/summarize_candidate_screening.py `
-  --inputs outputs/candidate_screening/ranked_scaffold_candidates_ethanol_450.csv outputs/candidate_screening/ranked_scaffold_candidates_ethanol_520.csv outputs/candidate_screening/ranked_scaffold_candidates_ethanol_600.csv `
-  --targets 450 520 600 `
-  --out outputs/candidate_screening/screening_summary.csv `
-  --markdown outputs/candidate_screening/screening_summary.md `
+python scripts/screen_candidate_molecules.py \
+  --candidates data/generated_candidates/scaffold_candidates.csv \
+  --solvent-smiles CCO \
+  --target-emission 600 \
+  --model-dir models/chemfluor_combined_fluodb \
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
+  --applicability-reference-csv models/chemfluor_combined_fluodb/combined_modeling_rows_after_feature_merge.csv \
+  --applicability-threshold 0.30 \
+  --out outputs/candidate_screening/ranked_scaffold_candidates_ethanol_600_fluodb.csv
+```
+
+---
+
+## Summarize Candidate Screening
+
+```bash
+python scripts/summarize_candidate_screening.py \
+  --inputs outputs/candidate_screening/ranked_scaffold_candidates_ethanol_450_fluodb.csv outputs/candidate_screening/ranked_scaffold_candidates_ethanol_520_fluodb.csv outputs/candidate_screening/ranked_scaffold_candidates_ethanol_600_fluodb.csv \
+  --targets 450 520 600 \
+  --out outputs/candidate_screening/screening_summary_fluodb.csv \
+  --markdown outputs/candidate_screening/screening_summary_fluodb.md \
   --top-n 10
-```
-
-Generated outputs:
-
-```text
-outputs/candidate_screening/screening_summary.csv
-outputs/candidate_screening/screening_summary.md
-```
-
-Summary CSV columns:
-
-```text
-target_emission_nm
-rank
-name
-scaffold
-substituent
-smiles
-canonical_smiles
-solvent_smiles
-predicted_absorption_nm
-predicted_emission_nm
-predicted_quantum_yield
-predicted_log_extinction
-nearest_training_similarity
-nearest_training_smiles
-outside_applicability_domain
-emission_error_from_target
-score
-estimated_brightness_score
 ```
 
 The Markdown report includes:
 
 * best candidate by target emission wavelength
-* blue/green/orange-red interpretation notes for targets near 450, 520, and 600 nm
-* scaffold counts among the top N candidates
-* substituent counts when available
-* notes when the best candidate is more than 30 nm from the target
-* notes when a scaffold family dominates the top N candidates
-* a caution that model-ranked candidates are priorities for follow-up, not experimentally validated fluorophores
-
-The summarizer is reusable for any ranked candidate CSVs and target wavelengths. If optional columns are missing, it writes the columns that are available and prints a warning instead of crashing.
+* blue/green/orange-red interpretation notes
+* scaffold counts among top candidates
+* substituent counts
+* warning if the best candidate is more than 30 nm from the target
+* warning if one scaffold family dominates the top candidates
+* caution that model-ranked candidates are not experimentally validated fluorophores
 
 ---
 
-## Example Candidate-Screening Result
+# Predicting New Molecules
 
-Using the 59 generated coumarin/naphthalimide candidates in ethanol:
+After training the original ChemFluor workflow, run prediction from the project root:
 
-| Target emission | Top candidate                                     | Top scaffold          | Substituent   | Predicted emission | Predicted QY |
-| --------------: | ------------------------------------------------- | --------------------- | ------------- | -----------------: | -----------: |
-|          450 nm | naphthalimide_4_substituted_n_butyl_phenyl        | N-butyl naphthalimide | phenyl        |           458.0 nm |        0.437 |
-|          520 nm | naphthalimide_4_substituted_n_butyl_cyano         | N-butyl naphthalimide | cyano         |           504.5 nm |        0.420 |
-|          600 nm | naphthalimide_4_substituted_n_butyl_dimethylamino | N-butyl naphthalimide | dimethylamino |           562.3 nm |        0.428 |
+```bash
+python -m src.predict --smiles "CCO" --solvent "MeOH"
+```
 
-The 600 nm result shows that the current small candidate library does not reach far enough into the red/orange region. Future work should expand the scaffold library with more red-shifted fluorophores.
+Save a JSON report:
 
-The generated screening summary adds the same conclusion automatically for the 600 nm target because the top candidate is 37.7 nm away from the target emission wavelength.
+```bash
+python -m src.predict \
+  --smiles "c1ccccc1" \
+  --solvent "MeCN" \
+  --name "candidate_1" \
+  --output outputs/predictions/candidate_1_prediction.json
+```
 
----
-
-## Reusable Package Modules
-
-The `src/chemfluor/` folder contains reusable code used by the scripts.
-
-Important modules include:
+Batch prediction uses a CSV with required columns:
 
 ```text
-data_standardization.py
-    Standardizes ChemFluor and Deep4Chem into a shared schema.
+SMILES
+solvent
+```
 
-features.py
-    Builds molecular and solvent features for the original ChemFluor workflow.
+Optional column:
 
-models.py
-    Defines model utilities for the original ChemFluor workflow.
+```text
+name
+```
 
-evaluate.py
-    Computes model metrics.
+Run batch prediction:
 
-plots.py
-    Creates plots for model evaluation.
-
-splitting.py
-    Handles train/test splitting.
-
-predict.py
-    Prediction utilities.
-
-applicability.py
-    Applicability-domain utilities.
-
-utils.py
-    Shared helper functions.
+```bash
+python -m src.predict \
+  --csv example_candidates.csv \
+  --save-csv outputs/predictions/batch_predictions.csv
 ```
 
 ---
 
-## Testing
+# Applicability Domain and Confidence Warnings
 
-Run all tests:
+The prediction and screening workflows report whether a molecule is similar to the model reference data.
+
+Applicability checks include:
+
+* maximum Morgan fingerprint Tanimoto similarity to reference molecules
+* nearest training/reference SMILES
+* whether the candidate falls below the selected similarity threshold
+* scaffold seen/unseen checks in the original prediction workflow
+* solvent seen/unseen checks in the original prediction workflow
+
+For candidate screening, important columns are:
+
+```text
+nearest_training_similarity
+nearest_training_smiles
+outside_applicability_domain
+```
+
+Low-confidence predictions should be treated as rough screening estimates, not definitive experimental predictions.
+
+---
+
+# Testing
+
+Run all tests locally:
 
 ```powershell
 python -m pytest tests
 ```
 
-Run only the data-standardization tests:
+On Nibi, use:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests
+```
+
+Run specific test groups:
 
 ```powershell
 python -m pytest tests/test_data_standardization.py
-```
-
-Run only the applicability-domain tests:
-
-```powershell
 python -m pytest tests/test_applicability_domain.py
-```
-
-Run only the candidate-screening summary tests:
-
-```powershell
+python -m pytest tests/test_fluodb_lite_standardization.py
+python -m pytest tests/test_standardized_deduplication.py
 python -m pytest tests/test_summarize_candidate_screening.py
 ```
 
 ---
 
-## Current Status of the Expanded Workflow
+# Saving Work to GitHub
 
-The project currently supports:
+Before committing, check status:
 
-```text
-combined ChemFluor + Deep4Chem training
-solvent-aware optical-property prediction
-Random Forest and HistGradientBoosting comparison
-model reporting and error analysis
-rule-based scaffold candidate generation
-target-emission candidate screening
-Morgan Tanimoto applicability-domain warnings
-top-N candidate screening summaries
+```bash
+git status
 ```
 
-The next major development step is to expand the candidate generator with additional red-shifted fluorophore scaffolds, such as BODIPY-like, rhodamine-like, fluorescein-like, cyanine-like, and larger donor-acceptor systems.
+Do not commit generated artifacts:
+
+```text
+models/
+outputs/
+*.joblib
+*.out
+*.err
+```
+
+Safe add command:
+
+```bash
+git add scripts src tests README.md requirements.txt .gitignore
+```
+
+If development notes are included:
+
+```bash
+git add "development md/Development2.md"
+```
+
+Check staged files:
+
+```bash
+git diff --cached --stat
+```
+
+If generated files were accidentally staged:
+
+```bash
+git restore --staged models outputs data/raw/fluodb data/processed
+```
+
+Commit:
+
+```bash
+git commit -m "Add FluoDB-Lite integration and training documentation"
+```
+
+Push:
+
+```bash
+git push origin main
+```
+
+If Git shows modified tracked data files that should not be committed, restore them only after confirming they are not needed:
+
+```bash
+git restore data/chemfluor_data.csv
+git restore data/solvent_descriptors.csv
+git restore data/solvent_descriptors_expanded_deep4chem.csv
+git restore data/test1_candidate_molecules.csv
+```
+
+---
+
+# Jupyter Notebooks
+
+The `notebooks/` folder provides department-facing notebooks.
+
+Recommended order:
+
+1. `00_project_overview.ipynb`
+2. `03_view_results.ipynb`
+3. `04_predict_new_molecule.ipynb`
+4. `05_batch_prediction.ipynb`
+
+Technical users may also use:
+
+1. `01_data_and_features.ipynb`
+2. `02_train_models.ipynb`
+
+The training notebook should submit a Slurm job rather than running full training directly inside the notebook.
+
+---
+
+# Known Limitations
+
+* PLQY is experimentally noisy and difficult to predict.
+* Solvent descriptor values should be verified before publication-quality use.
+* Random split can overestimate performance when similar molecules appear in train and test.
+* Scaffold split is a better estimate of performance on new molecular cores.
+* The grouped chromophore split prevents exact molecule leakage but is not equivalent to a scaffold split.
+* Red/NIR emission remains the hardest wavelength region.
+* The current candidate generator is too small and does not yet cover enough red-shifted fluorophore families.
+* Predictions for low-similarity molecules should be treated as rough estimates.
+
+---
+
+# Next Development Step
+
+The next major development step is to expand `scripts/generate_scaffold_candidates.py` with red-shifted fluorophore families, such as:
+
+```text
+BODIPY-like scaffolds
+cyanine-like scaffolds
+rhodamine-like scaffolds
+fluorescein-like scaffolds
+larger donor-acceptor systems
+extended aromatic systems
+```
+
+The next measurable milestone is:
+
+```text
+old 59-candidate library vs expanded red-shifted library
+→ screen both with the FluoDB-trained model
+→ compare best 600 nm emission error
+```
+
+---
+
+# Citation
+
+If using this project, cite the original ChemFluor dataset and paper.
+
+Dataset:
+
+```text
+ChemFluor. Figshare. DOI: 10.6084/m9.figshare.12110619
+```
+
+Original paper:
+
+```text
+Ju, C.-W.; Bai, H.; Li, B.; Liu, R. Machine Learning Enables Highly Accurate Predictions of Photophysical Properties of Organic Fluorescent Materials: Emission Wavelengths and Quantum Yields. Journal of Chemical Information and Modeling, 2021.
+```
