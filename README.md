@@ -958,24 +958,24 @@ cd "C:\Users\CL\OneDrive\Desktop\python\ChemFluor_Project"
 Transfer the full local `data/` folder:
 
 ```powershell
-scp -r data chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/
+scp -r data chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/
 ```
 
 Or transfer only specific files/folders:
 
 ```powershell
-scp data/chemfluor_data.csv chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/data/
-scp data/solvent_descriptors.csv chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/data/
-scp data/solvent_descriptors_expanded_deep4chem.csv chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/data/
-scp -r data/raw/deep4chem chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/data/raw/
-scp -r data/raw/fluodb chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/data/raw/
-scp -r data/processed/fluodb_lite chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/data/processed/
+scp data/chemfluor_data.csv chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/data/
+scp data/solvent_descriptors.csv chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/data/
+scp data/solvent_descriptors_expanded_deep4chem.csv chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/data/
+scp -r data/raw/deep4chem chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/data/raw/
+scp -r data/raw/fluodb chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/data/raw/
+scp -r data/processed/fluodb_lite chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/data/processed/
 ```
 
 If the destination directories do not exist yet, create them on Nibi first:
 
 ```bash
-cd ~/scratch/ChemFluor_Project_git
+cd ~/scratch/ChemFluor_Project
 mkdir -p data/raw/deep4chem
 mkdir -p data/raw/fluodb
 mkdir -p data/processed/fluodb_lite
@@ -994,7 +994,7 @@ ssh chrisl@nibi.alliancecan.ca
 Go to the project:
 
 ```bash
-cd ~/scratch/ChemFluor_Project_git
+cd ~/scratch/ChemFluor_Project
 ```
 
 Verify original ChemFluor-only files:
@@ -1020,7 +1020,7 @@ ls -lh data/processed/fluodb_lite/combined_deduplicated.csv
 If the repo already exists on Nibi:
 
 ```bash
-cd ~/scratch/ChemFluor_Project_git
+cd ~/scratch/ChemFluor_Project
 git pull origin main
 ```
 
@@ -1028,8 +1028,8 @@ If setting up for the first time:
 
 ```bash
 cd ~/scratch
-git clone https://github.com/chrislleung/ChemFluor.git ChemFluor_Project_git
-cd ChemFluor_Project_git
+git clone https://github.com/chrislleung/ChemFluor.git ChemFluor_Project
+cd ChemFluor_Project
 ```
 
 ---
@@ -1041,7 +1041,7 @@ cd ChemFluor_Project_git
 Load Nibi modules and activate the virtual environment:
 
 ```bash
-cd ~/scratch/ChemFluor_Project_git
+cd ~/scratch/ChemFluor_Project
 
 module purge
 module load python/3.11
@@ -1084,7 +1084,7 @@ module load rdkit
 python -m venv --system-site-packages ~/scratch/chemfluor_env
 source ~/scratch/chemfluor_env/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -r ~/scratch/ChemFluor_Project_git/requirements.txt
+python -m pip install -r ~/scratch/ChemFluor_Project/requirements.txt
 python -m pip install pytest typing_extensions matplotlib scipy
 ```
 
@@ -1114,7 +1114,7 @@ Create a script such as `run_combined_training.sh` (skip if already in directory
 
 set -euo pipefail
 
-cd ~/scratch/ChemFluor_Project_git
+cd ~/scratch/ChemFluor_Project
 
 module purge
 module load python/3.11
@@ -1172,7 +1172,7 @@ Paste:
 
 set -euo pipefail
 
-cd ~/scratch/ChemFluor_Project_git
+cd ~/scratch/ChemFluor_Project
 
 module purge
 module load python/3.11
@@ -1257,17 +1257,17 @@ cd "C:\Users\CL\OneDrive\Desktop\python\ChemFluor_Project_synced"
 Copy the original ChemFluor workflow outputs, if you trained the original dataset:
 
 ```powershell
-scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/metrics outputs/
-scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/plots outputs/
-scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/models outputs/
-scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/outputs/predictions outputs/
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/outputs/metrics outputs/
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/outputs/plots outputs/
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/outputs/models outputs/
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/outputs/predictions outputs/
 ```
 
 Copy the combined or FluoDB-expanded trained model folder, if needed:
 
 ```powershell
-scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/models/chemfluor_combined models/
-scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project_git/models/chemfluor_combined_fluodb models/
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/models/chemfluor_combined models/
+scp -r chrisl@nibi.alliancecan.ca:~/scratch/ChemFluor_Project/models/chemfluor_combined_fluodb models/
 ```
 
 Copy model reports:
