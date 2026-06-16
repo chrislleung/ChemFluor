@@ -1546,6 +1546,42 @@ outputs/model_experiments_fluodb/error_by_region_comparison.csv
 outputs/model_experiments_fluodb/benchmark_prediction_comparison.csv
 ```
 
+For Nibi, create a Slurm script such as `run_model_experiments.sh`:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=chemfluor_models
+#SBATCH --time=12:00:00
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --output=outputs/model_experiments_%j.out
+#SBATCH --error=outputs/model_experiments_%j.err
+
+module purge
+module load python/3.11
+module load gcc
+module load rdkit
+
+source ~/scratch/chemfluor_env/bin/activate
+
+python scripts/run_combined_model_experiments.py \
+  --standardized-combined data/processed/fluodb_lite/combined_deduplicated.csv \
+  --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
+  --out-root models/experiments_fluodb \
+  --models rf,extratrees,histgb,gbdt,mlp \
+  --targets emission_nm,quantum_yield \
+  --compare-out outputs/model_experiments_fluodb \
+  --n-jobs 16
+```
+
+Submit it with:
+
+```bash
+sbatch run_model_experiments.sh
+```
+
+---
+
 ## Neural Model Experiments
 
 Use `scripts/run_neural_model_experiments.py` to test stronger neural baselines against the existing RF, ExtraTrees, HistGB, and GBDT comparison outputs. The script trains separate models for each requested target, saves every sklearn alpha variant, skips PyTorch gracefully when `torch` is unavailable, and writes neural-only plus all-model comparison tables.
@@ -1587,16 +1623,25 @@ outputs/neural_model_experiments_fluodb/all_benchmark_prediction_comparison.csv
 
 Interpret the neural results by region and use case, not only by global MAE. If RF remains best overall, it should stay the default production model. A neural model is still scientifically useful if it improves low-similarity benchmark molecules, red/NIR emission errors, quantum-yield MAE, or provides a useful model-family disagreement signal for extrapolative molecules.
 
-For Nibi, create a Slurm script such as `run_model_experiments.sh`:
+For Nibi, create a Slurm script such as `run_neural_experiments.sh`:
 
 ```bash
 #!/bin/bash
-#SBATCH --job-name=chemfluor_models
+#SBATCH --job-name=chemfluor_neural
+#SBATCH --account=def-yzhao
 #SBATCH --time=12:00:00
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --output=outputs/model_experiments_%j.out
-#SBATCH --error=outputs/model_experiments_%j.err
+#SBATCH --output=outputs/slurm/chemfluor_neural_%j.out
+#SBATCH --error=outputs/slurm/chemfluor_neural_%j.err
+
+set -euo pipefail
+
+cd ~/scratch/ChemFluor_Project
+
+mkdir -p outputs/slurm
+mkdir -p models/neural_experiments_fluodb
+mkdir -p outputs/neural_model_experiments_fluodb
 
 module purge
 module load python/3.11
@@ -1605,14 +1650,27 @@ module load rdkit
 
 source ~/scratch/chemfluor_env/bin/activate
 
-python scripts/run_combined_model_experiments.py \
+echo "Job started on $(hostname)"
+echo "Start time: $(date)"
+echo "Working directory: $(pwd)"
+Aecho "Python: $(which python)"
+python --version
+
+python scripts/run_neural_model_experiments.py \
   --standardized-combined data/processed/fluodb_lite/combined_deduplicated.csv \
   --solvent-descriptors data/solvent_descriptors_expanded_deep4chem.csv \
-  --out-root models/experiments_fluodb \
-  --models rf,extratrees,histgb,gbdt,mlp \
+  --tree-compare-dir outputs/model_experiments_fluodb \
+  --out-root models/neural_experiments_fluodb \
+  --compare-out outputs/neural_model_experiments_fluodb \
+  --models mlp_small,mlp_medium,mlp_large,pytorch_mlp \
   --targets emission_nm,quantum_yield \
-  --compare-out outputs/model_experiments_fluodb \
-  --n-jobs 16
+  --benchmark-smiles "O=C(S/C(SC)=C(SC)/SC)C1=CC2=C(C=C1)NC3=CC=CC=C3S2" \
+  --benchmark-solvent-smiles "CS(=O)C" \
+  --known-emission-nm 539 \
+  --known-quantum-yield 0.196
+
+echo "End time: $(date)"
+echo "Job completed successfully."
 ```
 
 Submit it with:
