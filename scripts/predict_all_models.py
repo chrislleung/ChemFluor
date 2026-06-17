@@ -46,11 +46,11 @@ PREDICTION_TARGETS = ["emission_nm", "quantum_yield"]
 OUTPUT_COLUMNS = [
     "model",
     "model_family",
-    "target",
     "seed",
-    "predicted_value",
     "predicted_emission_nm",
     "predicted_quantum_yield",
+    "emission_abs_error_nm",
+    "quantum_yield_abs_error",
     "nearest_training_similarity",
     "nearest_training_smiles",
     "confidence_label",
@@ -91,6 +91,8 @@ def parse_args() -> argparse.Namespace:
         help="Optional graph model directories. Defaults to subdirectories of models/graph_experiments_fluodb.",
     )
     parser.add_argument("--out", default=None, type=Path, help="Optional CSV output path.")
+    parser.add_argument("--known-emission-nm", default=None, type=float)
+    parser.add_argument("--known-quantum-yield", default=None, type=float)
     parser.add_argument(
         "--applicability-threshold",
         default=DEFAULT_APPLICABILITY_THRESHOLD,
@@ -112,6 +114,52 @@ def discover_model_dirs(root: Path) -> list[Path]:
         if child.is_dir()
         and ((child / "feature_metadata.json").exists() or any(child.glob("*.joblib")))
     )
+
+
+def is_graph_artifact_dir(path: Path) -> bool:
+    """Return True when a directory contains graph metadata and checkpoints."""
+    return (
+        path.is_dir()
+        and (path / "feature_metadata.json").exists()
+        and any(path.glob("*.pt"))
+    )
+
+
+def output_path_to_model_path(path: Path) -> Path:
+    """Map an outputs/... graph report path to the corresponding models/... path."""
+    parts = list(path.parts)
+    for index, part in enumerate(parts):
+        if part.lower() == "outputs":
+            parts[index] = "models"
+            return Path(*parts)
+    return path
+
+
+def discover_graph_model_dirs(paths: list[Path] | None) -> list[Path]:
+    """Resolve direct, parent, and outputs graph paths to artifact directories."""
+    roots = paths if paths is not None else [DEFAULT_GRAPH_MODEL_DIR]
+    discovered: list[Path] = []
+    seen: set[Path] = set()
+    for original in roots:
+        candidates = [original]
+        mapped = output_path_to_model_path(original)
+        if mapped != original:
+            candidates.append(mapped)
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            artifact_dirs = (
+                [candidate]
+                if is_graph_artifact_dir(candidate)
+                else sorted(path for path in candidate.rglob("*") if is_graph_artifact_dir(path))
+            )
+            for artifact_dir in artifact_dirs:
+                resolved = artifact_dir.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                discovered.append(artifact_dir)
+    return discovered
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -330,7 +378,10 @@ def predict_graph_targets(
         raise ValueError(f"Could not convert molecule to graph: {canonical_smiles}")
     metadata = load_json(metadata_path)
     predictions: dict[str, float] = {}
-    for target in PREDICTION_TARGETS:
+    available_targets = available_graph_targets(model_dir, model_name)
+    if not available_targets:
+        return {}, [f"No graph checkpoint files found; skipping: {model_dir}"]
+    for target in available_targets:
         vector = solvent_vector_for_graph(metadata, target, solvent_row)
         try:
             predicted = helpers.predict_graph_target(
@@ -344,6 +395,17 @@ def predict_graph_targets(
             continue
         predictions[target] = float(predicted)
     return predictions, warnings
+
+
+def available_graph_targets(model_dir: Path, model_name: str) -> list[str]:
+    """Detect graph targets from saved checkpoint filenames."""
+    suffix = f"_{model_name}.pt"
+    targets = []
+    for path in sorted(model_dir.glob(f"*{suffix}")):
+        target = path.name.removesuffix(suffix)
+        if target in PREDICTION_TARGETS:
+            targets.append(target)
+    return targets
 
 
 def fallback_applicability_domain(
@@ -402,26 +464,35 @@ def rows_for_model(
     seed: int | None,
     predictions: dict[str, float],
     domain: dict[str, Any],
+    known_emission_nm: float | None = None,
+    known_quantum_yield: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Create one output row per predicted target."""
-    rows = []
-    for target, predicted in predictions.items():
-        rows.append(
-            {
-                "model": model,
-                "model_family": model_family,
-                "target": target,
-                "seed": seed,
-                "predicted_value": predicted,
-                "predicted_emission_nm": predictions.get("emission_nm"),
-                "predicted_quantum_yield": predictions.get("quantum_yield"),
-                "nearest_training_similarity": domain.get("nearest_training_similarity"),
-                "nearest_training_smiles": domain.get("nearest_training_smiles"),
-                "confidence_label": domain.get("confidence_label"),
-                "outside_applicability_domain": domain.get("outside_applicability_domain"),
-            }
-        )
-    return rows
+    """Create one output row per model/configuration."""
+    emission = predictions.get("emission_nm")
+    qy = predictions.get("quantum_yield")
+    return [
+        {
+            "model": model,
+            "model_family": model_family,
+            "seed": seed,
+            "predicted_emission_nm": emission,
+            "predicted_quantum_yield": qy,
+            "emission_abs_error_nm": (
+                None
+                if emission is None or known_emission_nm is None
+                else abs(float(emission) - float(known_emission_nm))
+            ),
+            "quantum_yield_abs_error": (
+                None
+                if qy is None or known_quantum_yield is None
+                else abs(float(qy) - float(known_quantum_yield))
+            ),
+            "nearest_training_similarity": domain.get("nearest_training_similarity"),
+            "nearest_training_smiles": domain.get("nearest_training_smiles"),
+            "confidence_label": domain.get("confidence_label"),
+            "outside_applicability_domain": domain.get("outside_applicability_domain"),
+        }
+    ]
 
 
 def disagreement_summary(values: pd.Series) -> dict[str, float | None]:
@@ -440,17 +511,52 @@ def disagreement_summary(values: pd.Series) -> dict[str, float | None]:
 
 
 def compute_disagreement_summaries(table: pd.DataFrame) -> dict[str, dict[str, float | None]]:
-    """Compute emission and quantum-yield disagreement across unique models."""
+    """Compute requested model-disagreement summaries."""
+    empty = pd.Series(dtype=float)
     if table.empty:
         return {
-            "emission_nm": disagreement_summary(pd.Series(dtype=float)),
-            "quantum_yield": disagreement_summary(pd.Series(dtype=float)),
+            "all_emission": disagreement_summary(empty),
+            "tree_neural_emission": disagreement_summary(empty),
+            "graph_emission": disagreement_summary(empty),
+            "graph_gin_emission": disagreement_summary(empty),
+            "graph_gcn_emission": disagreement_summary(empty),
+            "all_quantum_yield": disagreement_summary(empty),
+            "graph_quantum_yield": disagreement_summary(empty),
         }
-    model_level = table.drop_duplicates(["model", "model_family", "seed"])
+    model_level = table
+    graph = model_level[model_level["model_family"] == "graph_neural"]
+    non_graph = model_level[model_level["model_family"].isin(["tree", "neural"])]
     return {
-        "emission_nm": disagreement_summary(model_level["predicted_emission_nm"]),
-        "quantum_yield": disagreement_summary(model_level["predicted_quantum_yield"]),
+        "all_emission": disagreement_summary(model_level["predicted_emission_nm"]),
+        "tree_neural_emission": disagreement_summary(non_graph["predicted_emission_nm"]),
+        "graph_emission": disagreement_summary(graph["predicted_emission_nm"]),
+        "graph_gin_emission": disagreement_summary(
+            graph[graph["model"].astype(str).str.contains("graph_gin", case=False, na=False)]["predicted_emission_nm"]
+        ),
+        "graph_gcn_emission": disagreement_summary(
+            graph[graph["model"].astype(str).str.contains("graph_gcn", case=False, na=False)]["predicted_emission_nm"]
+        ),
+        "all_quantum_yield": disagreement_summary(model_level["predicted_quantum_yield"]),
+        "graph_quantum_yield": disagreement_summary(graph["predicted_quantum_yield"]),
     }
+
+
+def disagreement_level(summary: dict[str, float | None], target: str) -> str:
+    """Map disagreement range to a compact qualitative label."""
+    spread = summary.get("range")
+    if spread is None or pd.isna(spread):
+        return "unknown"
+    if target == "emission":
+        if spread < 20:
+            return "low"
+        if spread < 60:
+            return "moderate"
+        return "high"
+    if spread < 0.10:
+        return "low"
+    if spread < 0.25:
+        return "moderate"
+    return "high"
 
 
 def print_report(
@@ -474,8 +580,13 @@ def print_report(
         display = table[OUTPUT_COLUMNS].copy()
         print(display.to_string(index=False))
     for label, key in [
-        ("Emission disagreement (nm)", "emission_nm"),
-        ("Quantum-yield disagreement", "quantum_yield"),
+        ("All emission models (nm)", "all_emission"),
+        ("Tree/neural emission only (nm)", "tree_neural_emission"),
+        ("Graph emission only (nm)", "graph_emission"),
+        ("Graph GIN emission only (nm)", "graph_gin_emission"),
+        ("Graph GCN emission only (nm)", "graph_gcn_emission"),
+        ("All quantum-yield models", "all_quantum_yield"),
+        ("Graph quantum-yield only", "graph_quantum_yield"),
     ]:
         stats = summaries[key]
         print(f"\n{label}:")
@@ -486,8 +597,74 @@ def print_report(
                 for name, value in stats.items()
             )
         )
+    print_interpretation(table, summaries)
     for warning in warnings:
         print(f"WARNING: {warning}")
+
+
+def mean_prediction(table: pd.DataFrame, column: str, mask: pd.Series | None = None) -> float | None:
+    """Return the mean prediction for a column and optional row mask."""
+    source = table if mask is None else table[mask]
+    values = pd.to_numeric(source[column], errors="coerce").dropna()
+    return None if values.empty else float(values.mean())
+
+
+def print_interpretation(
+    table: pd.DataFrame,
+    summaries: dict[str, dict[str, float | None]],
+) -> None:
+    """Print final applicability and disagreement interpretation."""
+    print("\nInterpretation:")
+    if table.empty:
+        print("  No predictions were available to interpret.")
+        return
+
+    similarities = pd.to_numeric(table["nearest_training_similarity"], errors="coerce").dropna()
+    if similarities.empty:
+        print("  Nearest training similarity: unavailable.")
+    else:
+        nearest = float(similarities.max())
+        print(f"  Nearest training similarity: {nearest:.4f}.")
+    outside = table["outside_applicability_domain"].fillna(False).astype(bool).any()
+    if outside:
+        print("  Applicability-domain warning: at least one model flags this molecule as outside domain.")
+    else:
+        print("  Applicability-domain warning: not flagged by available applicability checks.")
+
+    emission_level = disagreement_level(summaries["all_emission"], "emission")
+    qy_level = disagreement_level(summaries["all_quantum_yield"], "quantum_yield")
+    print(f"  Model disagreement: emission {emission_level}; quantum yield {qy_level}.")
+
+    if "emission_abs_error_nm" in table.columns:
+        emission_errors = pd.to_numeric(table["emission_abs_error_nm"], errors="coerce").dropna()
+        if not emission_errors.empty:
+            best = table.loc[emission_errors.idxmin()]
+            print(
+                "  Best known-emission match: "
+                f"{best['model']} seed={best.get('seed')} "
+                f"abs_error={float(best['emission_abs_error_nm']):.4g} nm."
+            )
+    if "quantum_yield_abs_error" in table.columns:
+        qy_errors = pd.to_numeric(table["quantum_yield_abs_error"], errors="coerce").dropna()
+        if not qy_errors.empty:
+            best = table.loc[qy_errors.idxmin()]
+            print(
+                "  Best known-QY match: "
+                f"{best['model']} seed={best.get('seed')} "
+                f"abs_error={float(best['quantum_yield_abs_error']):.4g}."
+            )
+
+    graph_mask = table["model_family"] == "graph_neural"
+    non_graph_mask = table["model_family"].isin(["tree", "neural"])
+    graph_emission = mean_prediction(table, "predicted_emission_nm", graph_mask)
+    non_graph_emission = mean_prediction(table, "predicted_emission_nm", non_graph_mask)
+    if graph_emission is not None and non_graph_emission is not None:
+        delta = graph_emission - non_graph_emission
+        print(
+            "  Graph-vs-non-graph emission: "
+            f"graph mean {graph_emission:.4g} nm, non-graph mean {non_graph_emission:.4g} nm, "
+            f"delta {delta:+.4g} nm."
+        )
 
 
 def collect_predictions(args: argparse.Namespace) -> tuple[pd.DataFrame, list[str], str, str | None, str]:
@@ -517,7 +694,17 @@ def collect_predictions(args: argparse.Namespace) -> tuple[pd.DataFrame, list[st
             canonical_smiles, model_dir, args.standardized_combined, args.applicability_threshold
         )
         warnings.extend(domain_warnings)
-        rows.extend(rows_for_model(model_name, "tree", model_seed(model_dir), predictions, domain))
+        rows.extend(
+            rows_for_model(
+                model_name,
+                "tree",
+                model_seed(model_dir),
+                predictions,
+                domain,
+                args.known_emission_nm,
+                args.known_quantum_yield,
+            )
+        )
 
     for model_dir in discover_model_dirs(args.neural_model_dir):
         model_name = model_name_from_dir(model_dir)
@@ -531,12 +718,19 @@ def collect_predictions(args: argparse.Namespace) -> tuple[pd.DataFrame, list[st
             canonical_smiles, model_dir, args.standardized_combined, args.applicability_threshold
         )
         warnings.extend(domain_warnings)
-        rows.extend(rows_for_model(model_name, "neural", model_seed(model_dir), predictions, domain))
+        rows.extend(
+            rows_for_model(
+                model_name,
+                "neural",
+                model_seed(model_dir),
+                predictions,
+                domain,
+                args.known_emission_nm,
+                args.known_quantum_yield,
+            )
+        )
 
-    graph_dirs = args.graph_model_dirs
-    if graph_dirs is None:
-        graph_dirs = discover_model_dirs(DEFAULT_GRAPH_MODEL_DIR)
-    for model_dir in graph_dirs:
+    for model_dir in discover_graph_model_dirs(args.graph_model_dirs):
         model_name = model_name_from_dir(model_dir)
         predictions, model_warnings = predict_graph_targets(
             model_dir, model_name, canonical_smiles, solvent_row
@@ -548,7 +742,17 @@ def collect_predictions(args: argparse.Namespace) -> tuple[pd.DataFrame, list[st
             canonical_smiles, model_dir, args.standardized_combined, args.applicability_threshold
         )
         warnings.extend(domain_warnings)
-        rows.extend(rows_for_model(model_name, "graph_neural", model_seed(model_dir), predictions, domain))
+        rows.extend(
+            rows_for_model(
+                model_name,
+                "graph_neural",
+                model_seed(model_dir),
+                predictions,
+                domain,
+                args.known_emission_nm,
+                args.known_quantum_yield,
+            )
+        )
 
     return pd.DataFrame(rows, columns=OUTPUT_COLUMNS), warnings, canonical_smiles, canonical_solvent, solvent_label
 

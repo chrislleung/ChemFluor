@@ -83,6 +83,46 @@ def write_tree_model_root(
     return root
 
 
+def write_graph_artifact_dir(
+    root: Path,
+    *,
+    model_name: str = "graph_gin",
+    seed: int | None = 0,
+    targets: tuple[str, ...] = ("emission_nm",),
+) -> Path:
+    model_dir = root / model_name
+    model_dir.mkdir(parents=True)
+    metadata = {
+        "model_type": model_name,
+        "model_family": "graph_neural",
+        "seed": seed,
+        "solvent_descriptor_columns_used": ["dielectric_constant"],
+        "median_values_used_for_imputation": {
+            target: {"dielectric_constant": 1.0} for target in targets
+        },
+    }
+    (model_dir / "feature_metadata.json").write_text(
+        json.dumps(metadata), encoding="utf-8"
+    )
+    pd.DataFrame({"canonical_chromophore_smiles": ["CCO"]}).to_csv(
+        model_dir / "combined_modeling_rows_after_feature_merge.csv", index=False
+    )
+    for target in targets:
+        (model_dir / f"{target}_{model_name}.pt").write_text("mock", encoding="utf-8")
+    return model_dir
+
+
+class FakeGraphHelpers:
+    @staticmethod
+    def import_torch():
+        return object()
+
+    @staticmethod
+    def predict_graph_target(model_dir, model_name, target, graph, vector, torch):
+        values = {"emission_nm": 500.0, "quantum_yield": 0.33}
+        return values[target]
+
+
 def run_main(monkeypatch, argv: list[str]) -> int:
     monkeypatch.setattr(sys, "argv", ["predict_all_models.py", *argv])
     return int(predict_script.main())
@@ -165,10 +205,10 @@ def test_output_csv_creation(tmp_path: Path, monkeypatch) -> None:
 
     table = pd.read_csv(output_csv)
     assert exit_code == 0
-    assert len(table) == 2
-    assert set(table["target"]) == {"emission_nm", "quantum_yield"}
+    assert len(table) == 1
     assert table["predicted_emission_nm"].dropna().unique().tolist() == [456.0]
     assert table["predicted_quantum_yield"].dropna().unique().tolist() == [0.42]
+    assert "target" not in table.columns
 
 
 def test_disagreement_summary_correctness() -> None:
@@ -193,13 +233,13 @@ def test_disagreement_summary_correctness() -> None:
 
     summaries = predict_script.compute_disagreement_summaries(table)
 
-    assert summaries["emission_nm"]["mean"] == pytest.approx(450.0)
-    assert summaries["emission_nm"]["median"] == pytest.approx(450.0)
-    assert summaries["emission_nm"]["std"] == pytest.approx(50.0)
-    assert summaries["emission_nm"]["min"] == pytest.approx(400.0)
-    assert summaries["emission_nm"]["max"] == pytest.approx(500.0)
-    assert summaries["emission_nm"]["range"] == pytest.approx(100.0)
-    assert summaries["quantum_yield"]["range"] == pytest.approx(0.4)
+    assert summaries["all_emission"]["mean"] == pytest.approx(450.0)
+    assert summaries["all_emission"]["median"] == pytest.approx(450.0)
+    assert summaries["all_emission"]["std"] == pytest.approx(50.0)
+    assert summaries["all_emission"]["min"] == pytest.approx(400.0)
+    assert summaries["all_emission"]["max"] == pytest.approx(500.0)
+    assert summaries["all_emission"]["range"] == pytest.approx(100.0)
+    assert summaries["all_quantum_yield"]["range"] == pytest.approx(0.4)
 
 
 def test_missing_model_files_are_skipped_with_warning(
@@ -223,3 +263,85 @@ def test_missing_model_files_are_skipped_with_warning(
     assert "Model file not found; skipping" in captured.out
     assert "quantum_yield_rf.joblib" in captured.out
     assert "emission_nm" in captured.out
+
+
+def test_direct_graph_artifact_directory_is_discovered(tmp_path: Path) -> None:
+    graph_dir = write_graph_artifact_dir(tmp_path / "models" / "run" / "seed_0")
+
+    assert predict_script.discover_graph_model_dirs([graph_dir]) == [graph_dir]
+
+
+def test_parent_graph_model_directory_is_discovered(tmp_path: Path) -> None:
+    parent = tmp_path / "models" / "run" / "seed_0"
+    graph_dir = write_graph_artifact_dir(parent)
+
+    assert predict_script.discover_graph_model_dirs([parent]) == [graph_dir]
+
+
+def test_outputs_graph_directory_resolves_to_models_directory(tmp_path: Path) -> None:
+    model_parent = tmp_path / "models" / "run" / "seed_0"
+    output_parent = tmp_path / "outputs" / "run" / "seed_0"
+    output_parent.mkdir(parents=True)
+    graph_dir = write_graph_artifact_dir(model_parent)
+
+    assert predict_script.discover_graph_model_dirs([output_parent]) == [graph_dir]
+
+
+def test_graph_single_target_folder_has_no_missing_target_warning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    graph_dir = write_graph_artifact_dir(tmp_path / "models" / "run" / "seed_0")
+    solvent_descriptors = pd.read_csv(write_solvent_descriptors(tmp_path))
+    solvent_row = solvent_descriptors.iloc[0]
+    monkeypatch.setattr(predict_script, "import_graph_helpers", lambda: FakeGraphHelpers)
+
+    predictions, warnings = predict_script.predict_graph_targets(
+        graph_dir, "graph_gin", "CCO", solvent_row
+    )
+
+    assert predictions == {"emission_nm": 500.0}
+    assert not any("quantum_yield" in warning for warning in warnings)
+
+
+def test_known_emission_error_calculation(tmp_path: Path, monkeypatch) -> None:
+    tree_root = write_tree_model_root(tmp_path)
+    output_csv = tmp_path / "predictions.csv"
+
+    exit_code = run_main(
+        monkeypatch,
+        [
+            "--smiles",
+            "CCO",
+            "--solvent",
+            "water",
+            "--known-emission-nm",
+            "450",
+            "--out",
+            str(output_csv),
+            *base_args(tmp_path, tree_root),
+        ],
+    )
+
+    table = pd.read_csv(output_csv)
+    assert exit_code == 0
+    assert table.loc[0, "emission_abs_error_nm"] == pytest.approx(6.0)
+
+
+def test_disagreement_summaries_by_model_family() -> None:
+    table = pd.DataFrame(
+        [
+            {"model": "rf", "model_family": "tree", "seed": None, "predicted_emission_nm": 400.0, "predicted_quantum_yield": 0.2},
+            {"model": "mlp", "model_family": "neural", "seed": None, "predicted_emission_nm": 410.0, "predicted_quantum_yield": 0.3},
+            {"model": "graph_gin", "model_family": "graph_neural", "seed": 0, "predicted_emission_nm": 500.0, "predicted_quantum_yield": 0.4},
+            {"model": "graph_gcn", "model_family": "graph_neural", "seed": 1, "predicted_emission_nm": 530.0, "predicted_quantum_yield": np.nan},
+        ]
+    )
+
+    summaries = predict_script.compute_disagreement_summaries(table)
+
+    assert summaries["all_emission"]["range"] == pytest.approx(130.0)
+    assert summaries["tree_neural_emission"]["range"] == pytest.approx(10.0)
+    assert summaries["graph_emission"]["range"] == pytest.approx(30.0)
+    assert summaries["graph_gin_emission"]["mean"] == pytest.approx(500.0)
+    assert summaries["graph_gcn_emission"]["mean"] == pytest.approx(530.0)
+    assert summaries["graph_quantum_yield"]["mean"] == pytest.approx(0.4)
