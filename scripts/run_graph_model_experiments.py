@@ -6,6 +6,7 @@ import argparse
 import importlib
 import json
 import math
+import random
 import shutil
 import sys
 from dataclasses import dataclass
@@ -79,6 +80,7 @@ class GraphTargetData:
     descriptor_medians: pd.Series
     train_reference_fps: list[Any]
     train_reference_smiles: list[str]
+    seed: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -94,7 +96,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compare-out", default=DEFAULT_COMPARE_OUT, type=Path)
     parser.add_argument("--models", default=DEFAULT_MODELS)
     parser.add_argument("--targets", default=DEFAULT_TARGETS)
-    parser.add_argument("--random-state", default=42, type=int)
+    parser.add_argument(
+        "--seed",
+        default=42,
+        type=int,
+        help=(
+            "Seed controlling data splitting and graph model training "
+            "reproducibility."
+        ),
+    )
+    parser.add_argument(
+        "--random-state",
+        default=None,
+        type=int,
+        help="Deprecated alias for --seed; kept for older commands.",
+    )
     parser.add_argument("--test-size", default=0.2, type=float)
     parser.add_argument("--val-size", default=0.1, type=float)
     parser.add_argument("--epochs", default=200, type=int)
@@ -123,6 +139,28 @@ def import_torch() -> Any | None:
         return None
 
 
+def resolve_seed(args: argparse.Namespace) -> int:
+    """Resolve --seed while preserving the older --random-state alias."""
+    if args.random_state is not None:
+        return int(args.random_state)
+    return int(args.seed)
+
+
+def set_global_seed(seed: int) -> None:
+    """Seed Python, NumPy, and PyTorch when available."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch = import_torch()
+    if torch is None:
+        return
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
 def parse_csv_list(text: str) -> list[str]:
     """Parse a comma-separated CLI list."""
     return [item.strip() for item in text.split(",") if item.strip()]
@@ -147,7 +185,7 @@ def load_graph_inputs(args: argparse.Namespace) -> tuple[pd.DataFrame, list[str]
     combined_rows = trainer.load_standardized_combined(args.standardized_combined)
     if args.max_train_rows is not None and len(combined_rows) > args.max_train_rows:
         combined_rows = combined_rows.sample(
-            n=args.max_train_rows, random_state=args.random_state
+            n=args.max_train_rows, random_state=args.seed
         ).reset_index(drop=True)
         print(f"Using {len(combined_rows)} sampled row(s) due to --max-train-rows.")
     solvent_descriptors = trainer.load_solvent_descriptors(args.solvent_descriptors)
@@ -194,7 +232,7 @@ def prepare_target_data(
         return None
 
     train_index, val_index, test_index = split_train_val_test(
-        target_rows, args.test_size, args.val_size, args.random_state
+        target_rows, args.test_size, args.val_size, args.seed
     )
     descriptor_values = target_rows[descriptor_columns].apply(pd.to_numeric, errors="coerce")
     medians = descriptor_values.iloc[train_index].median(numeric_only=True)
@@ -253,6 +291,7 @@ def prepare_target_data(
         descriptor_medians=medians,
         train_reference_fps=train_fps,
         train_reference_smiles=train_fp_smiles,
+        seed=int(args.seed),
     )
 
 
@@ -292,13 +331,30 @@ def collate_graph_batch(samples: list[GraphSample], torch: Any | None = None) ->
     }
 
 
-def make_loader(samples: list[GraphSample], batch_size: int, shuffle: bool, torch: Any) -> Any:
+def seed_worker(worker_id: int) -> None:
+    """Seed DataLoader worker processes deterministically."""
+    worker_seed = (np.random.get_state()[1][0] + worker_id) % 2**32
+    random.seed(int(worker_seed))
+    np.random.seed(int(worker_seed))
+
+
+def make_loader(
+    samples: list[GraphSample],
+    batch_size: int,
+    shuffle: bool,
+    torch: Any,
+    seed: int,
+) -> Any:
     """Create a PyTorch DataLoader for graph samples."""
     data_mod = importlib.import_module("torch.utils.data")
+    generator = torch.Generator()
+    generator.manual_seed(seed)
     return data_mod.DataLoader(
         samples,
         batch_size=batch_size,
         shuffle=shuffle,
+        generator=generator,
+        worker_init_fn=seed_worker,
         collate_fn=lambda batch: collate_graph_batch(batch, torch=torch),
     )
 
@@ -428,9 +484,7 @@ def train_one_graph_target(
     torch: Any,
 ) -> dict[str, Any]:
     """Train one graph model for one target."""
-    torch.manual_seed(args.random_state)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.random_state)
+    set_global_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     GraphRegressor = build_model_class(torch)
     solvent_dim = int(data.samples[0].solvent.shape[0])
@@ -447,10 +501,22 @@ def train_one_graph_target(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
     loss_fn = torch.nn.SmoothL1Loss()
-    train_loader = make_loader(subset_samples(data, data.train_index), args.batch_size, True, torch)
+    train_loader = make_loader(
+        subset_samples(data, data.train_index),
+        args.batch_size,
+        True,
+        torch,
+        args.seed,
+    )
     val_samples = subset_samples(data, data.val_index if len(data.val_index) else data.test_index)
-    val_loader = make_loader(val_samples, args.batch_size, False, torch)
-    test_loader = make_loader(subset_samples(data, data.test_index), args.batch_size, False, torch)
+    val_loader = make_loader(val_samples, args.batch_size, False, torch, args.seed)
+    test_loader = make_loader(
+        subset_samples(data, data.test_index),
+        args.batch_size,
+        False,
+        torch,
+        args.seed,
+    )
 
     best_state: dict[str, Any] | None = None
     best_val_mae = float("inf")
@@ -512,6 +578,7 @@ def train_one_graph_target(
         "target": target,
         "model_type": model_name,
         "model_family": "graph_neural",
+        "seed": int(args.seed),
         "mae": float(mean_absolute_error(y_test, y_pred)),
         "rmse": float(math.sqrt(mean_squared_error(y_test, y_pred))),
         "r2": float(r2_score(y_test, y_pred)) if len(y_test) > 1 else float("nan"),
@@ -537,6 +604,7 @@ def save_predictions(
     rows["y_true"] = y_test
     rows["y_pred"] = y_pred
     rows["residual"] = rows["y_true"] - rows["y_pred"]
+    rows["seed"] = int(data.seed)
     similarities = []
     nearest = []
     for smiles in rows["canonical_chromophore_smiles"].astype(str):
@@ -588,6 +656,7 @@ def train_graph_model(
         "hidden_dim": args.hidden_dim,
         "num_layers": args.num_layers,
         "dropout": args.dropout,
+        "seed": int(args.seed),
     }
     (out_dir / "feature_metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
     shutil.copyfile(args._modeling_rows_source, out_dir / "combined_modeling_rows_after_feature_merge.csv")
@@ -607,6 +676,7 @@ def collect_model_metrics(model_dirs: dict[str, Path]) -> pd.DataFrame:
                 {
                     "model": model_name,
                     "model_family": "graph_neural",
+                    "seed": metric.get("seed"),
                     "target": metric.get("target"),
                     "mae": metric.get("mae"),
                     "rmse": metric.get("rmse"),
@@ -621,7 +691,7 @@ def collect_model_metrics(model_dirs: dict[str, Path]) -> pd.DataFrame:
 def sort_comparison(comparison: pd.DataFrame) -> pd.DataFrame:
     """Sort comparison by target and MAE."""
     if comparison.empty:
-        return pd.DataFrame(columns=["model", "model_family", "target", "mae", "rmse", "r2", "train_rows", "test_rows"])
+        return pd.DataFrame(columns=["model", "model_family", "seed", "target", "mae", "rmse", "r2", "train_rows", "test_rows"])
     working = comparison.copy()
     working["_target_rank"] = working["target"].map({"emission_nm": 0, "quantum_yield": 1}).fillna(2)
     working["mae"] = pd.to_numeric(working["mae"], errors="coerce")
@@ -694,6 +764,11 @@ def compute_similarity_bin_outputs(model_dirs: dict[str, Path]) -> pd.DataFrame:
                     {
                         "model": model_name,
                         "model_family": "graph_neural",
+                        "seed": (
+                            int(subset["seed"].iloc[0])
+                            if "seed" in subset.columns and pd.notna(subset["seed"].iloc[0])
+                            else None
+                        ),
                         "target": target,
                         "similarity_bin": label,
                         "rows": int(len(subset)),
@@ -818,6 +893,7 @@ def benchmark_prediction_for_model(model_name: str, model_dir: Path, args: argpa
     return {
         "model": model_name,
         "model_family": "graph_neural",
+        "seed": int(args.seed),
         "predicted_emission_nm": emission,
         "known_emission_nm": args.known_emission_nm,
         "emission_absolute_error": None if emission is None or args.known_emission_nm is None else abs(emission - args.known_emission_nm),
@@ -858,6 +934,7 @@ def write_disagreement_summary(compare_out: Path, benchmark: pd.DataFrame, all_b
         column for column in [
             "model",
             "model_family",
+            "seed",
             "predicted_emission_nm",
             "predicted_quantum_yield",
             "nearest_training_similarity",
@@ -919,6 +996,8 @@ def main() -> int:
     """Run graph model experiments."""
     args = parse_args()
     try:
+        args.seed = resolve_seed(args)
+        set_global_seed(args.seed)
         selected_models = validate_graph_models(parse_csv_list(args.models))
         selected_targets = trainer.parse_targets(args.targets)
         torch = import_torch()
@@ -951,6 +1030,7 @@ def main() -> int:
         graph_region = combined_experiments.collect_error_by_region(model_dirs)
         if not graph_region.empty:
             graph_region.insert(1, "model_family", "graph_neural")
+            graph_region.insert(2, "seed", int(args.seed))
         graph_benchmark = collect_benchmark_predictions(model_dirs, args, torch)
         similarity_table = compute_similarity_bin_outputs(model_dirs)
         write_outputs(

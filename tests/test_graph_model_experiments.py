@@ -61,6 +61,21 @@ def test_invalid_smiles_returns_none() -> None:
     assert mol_to_graph("not-a-smiles") is None
 
 
+def test_seed_appears_in_cli_help(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["run_graph_model_experiments.py", "--help"])
+
+    with pytest.raises(SystemExit):
+        graph_script.parse_args()
+
+    captured = capsys.readouterr()
+    assert "--seed" in captured.out
+    assert "reproducibility" in captured.out
+
+
+def test_set_global_seed_can_be_called_without_error() -> None:
+    graph_script.set_global_seed(123)
+
+
 def sample(smiles: str, y: float) -> graph_script.GraphSample:
     graph = mol_to_graph(smiles)
     assert graph is not None
@@ -125,6 +140,7 @@ def test_output_comparison_files_created_without_old_comparisons(tmp_path: Path)
             {
                 "model": "graph_gcn",
                 "model_family": "graph_neural",
+                "seed": 123,
                 "target": "emission_nm",
                 "mae": 10.0,
                 "rmse": 12.0,
@@ -181,6 +197,8 @@ def test_cli_smoke_with_tiny_dataset_and_one_epoch(
             "graph_gcn",
             "--targets",
             "emission_nm",
+            "--seed",
+            "123",
             "--epochs",
             "1",
             "--batch-size",
@@ -193,8 +211,64 @@ def test_cli_smoke_with_tiny_dataset_and_one_epoch(
     )
 
     assert graph_script.main() == 0
+    comparison = pd.read_csv(tmp_path / "compare" / "graph_model_comparison.csv")
+    assert set(comparison["seed"]) == {123}
     assert (tmp_path / "compare" / "graph_model_comparison.csv").exists()
     assert (tmp_path / "compare" / "all_model_comparison.csv").exists()
+
+
+def test_two_tiny_runs_same_seed_keep_split_sizes_and_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    require_torch()
+    rows = tiny_rows()
+    monkeypatch.setattr(graph_script, "load_graph_inputs", lambda args: (rows, ["dielectric_constant"]))
+    outputs = []
+    for run_index in range(2):
+        standardized = tmp_path / f"combined_{run_index}.csv"
+        solvents = tmp_path / f"solvents_{run_index}.csv"
+        standardized.write_text("placeholder\n", encoding="utf-8")
+        solvents.write_text("placeholder\n", encoding="utf-8")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "run_graph_model_experiments.py",
+                "--standardized-combined",
+                str(standardized),
+                "--solvent-descriptors",
+                str(solvents),
+                "--tree-compare-dir",
+                str(tmp_path / f"tree_{run_index}"),
+                "--neural-compare-dir",
+                str(tmp_path / f"neural_{run_index}"),
+                "--out-root",
+                str(tmp_path / f"models_{run_index}"),
+                "--compare-out",
+                str(tmp_path / f"compare_{run_index}"),
+                "--models",
+                "graph_gcn",
+                "--targets",
+                "emission_nm",
+                "--seed",
+                "123",
+                "--epochs",
+                "1",
+                "--batch-size",
+                "2",
+                "--hidden-dim",
+                "16",
+                "--num-layers",
+                "2",
+            ],
+        )
+        assert graph_script.main() == 0
+        outputs.append(pd.read_csv(tmp_path / f"compare_{run_index}" / "graph_model_comparison.csv"))
+
+    assert outputs[0]["train_rows"].tolist() == outputs[1]["train_rows"].tolist()
+    assert outputs[0]["test_rows"].tolist() == outputs[1]["test_rows"].tolist()
+    assert list(outputs[0].columns) == list(outputs[1].columns)
+    assert set(outputs[0]["seed"]) == {123}
 
 
 def test_benchmark_output_schema(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -237,12 +311,14 @@ def test_benchmark_output_schema(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
             "known_quantum_yield": 0.25,
             "solvent_descriptors": solvents,
             "applicability_threshold": 0.5,
+            "seed": 123,
         },
     )()
 
     result = graph_script.benchmark_prediction_for_model("graph_gcn", model_dir, args, torch)
 
     assert result["model"] == "graph_gcn"
+    assert result["seed"] == 123
     assert result["predicted_emission_nm"] == pytest.approx(500.0)
     assert result["emission_absolute_error"] == pytest.approx(10.0)
     assert "nearest_training_similarity" in result

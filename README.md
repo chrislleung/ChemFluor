@@ -1668,6 +1668,8 @@ outputs/graph_model_experiments_fluodb/model_disagreement_summary.csv
 
 Interpret graph results cautiously. A graph neural network may not beat RF globally, especially on modest tabular chemistry datasets. The key test is whether it improves low-similarity bins, red/NIR error, benchmark molecules, QY behavior, or disagreement-based uncertainty detection. If improvement appears only in high-similarity bins, it is mostly interpolation; improvement in the `0.00-0.30` or `0.30-0.50` similarity bins is stronger evidence for extrapolative value.
 
+Use `--seed` to control grouped splitting, model initialization, DataLoader shuffling, and training reproducibility. The default is `--seed 42`, so older commands continue to work. For stability testing, run emission models with seeds `0`, `1`, and `2`, especially `graph_gin` and `graph_gcn`. GPU training is recommended for full graph experiments.
+
 Submit the full graph workflow on Nibi:
 
 ```bash
