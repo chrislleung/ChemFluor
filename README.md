@@ -6,7 +6,7 @@ FluorCast is a solvent-aware machine learning workflow for predicting fluorescen
 chromophore SMILES + solvent SMILES/name → emission wavelength + quantum yield
 ```
 
-This README covers the current combined workflow only:
+This README covers the current combined workflow with datasets:
 
 ```text
 ChemFluor + Deep4Chem + FluoDB-Lite
