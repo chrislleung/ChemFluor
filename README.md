@@ -337,6 +337,16 @@ cat outputs/graph_seed_summary_grouped.csv
 cat outputs/predictions/difficult_benchmark_all_models_with_graphs_and_qy.csv
 ```
 
+View Queue
+```bash
+squeue -u $USER
+```
+
+Cancel Job
+```bash
+scancel JOBID
+```
+
 Find recent Slurm logs:
 
 ```bash

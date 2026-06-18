@@ -1,0 +1,12 @@
+name,molecule_smiles,solvent,solvent_smiles,expected_emission_nm,expected_qy,notes
+Fluorescein,O=C1OC2(c3ccc(O)cc3Oc3cc(O)ccc32)c2ccccc12,basic ethanol,CCO,515,0.97,Very bright green; pH-sensitive; good easy sanity check
+Rhodamine 6G,[H+].[Cl-].CCNC1=C(C)C=C2C(OC3=CC(=NCC)C(C)=CC3=C2C2=CC=CC=C2C(=O)OCC)=C1,ethanol,CCO,552,0.95,Very bright yellow-orange/red; excellent model sanity check
+Coumarin 153,C1CC2=CC3=C(C4=C2N(C1)CCC4)OC(=O)C=C3C(F)(F)F,ethanol,CCO,532,0.53,Solvatochromic dye; harder than rhodamine/fluorescein
+Coumarin 153,C1CC2=CC3=C(C4=C2N(C1)CCC4)OC(=O)C=C3C(F)(F)F,cyclohexane,C1CCCCC1,475,0.90,Same molecule in nonpolar solvent; useful solvent-sensitivity test
+Nile Red,CCN(CC)c1ccc2c(c1)oc-3cc(=O)c4ccccc4c3n2,dioxane,C1COCCO1,570,0.70,Strong solvent dependence; good red-region test
+Nile Blue,CCN(CC)c1ccc2nc3ccc(N(CC)CC)cc3[o+]c2c1,methanol,CO,660,0.27,Deep red/NIR-ish; harder red-region test
+Perylene,c1ccc2c(c1)ccc1c3ccccc3ccc21,cyclohexane,C1CCCCC1,445,0.94,Very bright blue; good PAH sanity check
+Anthracene,c1ccc2cc3ccccc3cc2c1,cyclohexane,C1CCCCC1,400,0.27,Small PAH; useful lower-wavelength test
+Pyrene,c1cc2ccc3cccc4ccc(c1)c2c34,cyclohexane,C1CCCCC1,390,0.32,Structured blue emission; may be concentration-sensitive
+DAPI,NC(=N)c1ccc(-c2[nH]c3cc(C(=N)N)ccc3c2)cc1,DMSO,CS(C)=O,455,0.58,Blue dye; model may struggle if training lacks amidines/salts
+Quinine,COc1ccc2nccc(C(O)C3CC4CCN3CC4C=C)c2c1,acidic water,O,450,0.546,Classic QY standard; condition is aqueous acid, not plain water
