@@ -39,6 +39,48 @@ Graph GIN is the strongest and most stable graph emission model.
 
 ---
 
+## External Known-Fluorophore Benchmark Diagnostics
+
+Use this diagnostic pipeline after generating known-fluorophore prediction CSVs with
+`scripts/predict_all_models.py`. It consolidates per-molecule prediction files,
+compares predictions with literature benchmark values, checks training-set overlap,
+classifies likely failure modes, scores confidence, and writes manuscript-ready
+CSV/Markdown summaries.
+
+```bash
+python scripts/diagnose_external_benchmark.py \
+  --prediction-dir outputs/predictions-6-18 \
+  --training-csv models/experiments_fluodb/rf/combined_standardized_training_rows.csv \
+  --out-dir outputs/predictions-6-18/diagnostics
+```
+
+Main outputs:
+
+```text
+external_benchmark_all_predictions.csv
+external_benchmark_model_summary.csv
+external_benchmark_family_summary.csv
+external_benchmark_molecule_summary.csv
+external_benchmark_training_overlap.csv
+external_benchmark_failure_modes.csv
+external_benchmark_report.md
+```
+
+Key interpretation points:
+
+- `external_benchmark_training_overlap.csv` separates molecule overlap, solvent
+  overlap, and exact molecule-solvent-pair overlap. This explains why
+  `nearest_training_similarity = 1.0` can still fail.
+- `external_benchmark_failure_modes.csv` flags likely issues such as
+  benchmark/training label mismatch, solvent or condition mismatch, high model
+  disagreement, QY condition sensitivity, and structural extrapolation.
+- Confidence scores combine molecule/solvent/pair overlap, nearest-training
+  similarity, training-label consistency, and model agreement.
+- Optional PNG plots are written when matplotlib is installed; plotting is skipped
+  gracefully otherwise.
+
+---
+
 ## Required Data
 
 The current workflow expects these files. They are included in the GitHub repository:
