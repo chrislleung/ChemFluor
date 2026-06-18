@@ -283,7 +283,7 @@ cd ~/scratch/ChemFluor_Project
 sbatch run_predict_all_models.sh
 ```
 
-For a custom molecule, run:
+For a custom molecule, replace the "python scripts/predict_all_models.py..." portion of the script with:
 
 ```bash
 python scripts/predict_all_models.py \
