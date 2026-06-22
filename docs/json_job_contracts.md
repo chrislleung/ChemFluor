@@ -23,9 +23,10 @@ Input:
 }
 ```
 
-`model_choice` accepts `all`, `rf`, `extratrees`, `histgb`, or
-`graph_model_later`. The last value is reserved and currently returns
-`PREDICTION_BACKEND_NOT_CONNECTED`.
+`model_choice` accepts `all`, `rf`, `extratrees`, `gbdt`, `histgb`, or
+`graph_model_later`. RF and ExtraTrees are the supported model artifacts.
+GBDT, HistGB, and the future graph model are experimental and are used only
+when their artifacts load successfully in the current environment.
 
 Successful output:
 
@@ -54,6 +55,15 @@ The runner adapts `scripts/predict_all_models.py`. It never invents values: if
 no requested model artifacts produce a prediction, the job fails with
 `PREDICTION_BACKEND_NOT_CONNECTED`. The existing models do not currently emit
 absorption predictions, so that property is `null`.
+
+For `model_choice: "all"`, each model artifact is checked independently. Models
+that cannot be loaded, including artifacts created by an incompatible
+scikit-learn version, are skipped and described in the top-level `warnings`
+array. Predictions from available models still produce a successful job.
+Requesting an unavailable model explicitly, such as `histgb` or `gbdt`, fails
+with `error_code: "MODEL_UNAVAILABLE"`; the error message explains that the
+artifact could not be loaded in the current environment, and loader details
+are retained in `warnings`.
 
 ## Duplicate-check jobs
 

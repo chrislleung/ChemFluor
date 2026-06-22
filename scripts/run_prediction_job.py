@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Sequence
 
+import pandas as pd
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = PROJECT_ROOT / "scripts"
 if str(SCRIPT_DIR) not in sys.path:
@@ -27,7 +29,21 @@ REQUIRED_FIELDS = (
     "model_choice",
     "requested_at",
 )
-MODEL_CHOICES = {"all", "rf", "extratrees", "histgb", "graph_model_later"}
+MODEL_CHOICES = {
+    "all",
+    "rf",
+    "extratrees",
+    "gbdt",
+    "histgb",
+    "graph_model_later",
+}
+MODEL_AVAILABILITY = {
+    "rf": {"artifact_dir": "rf", "experimental": False},
+    "extratrees": {"artifact_dir": "extratrees", "experimental": False},
+    "gbdt": {"artifact_dir": "gbdt", "experimental": True},
+    "histgb": {"artifact_dir": "histgb", "experimental": True},
+    "graph_model_later": {"artifact_dir": None, "experimental": True},
+}
 PredictionBackend = Callable[
     [dict[str, Any]], tuple[list[dict[str, Any]], list[str], str, str]
 ]
@@ -36,9 +52,12 @@ PredictionBackend = Callable[
 class JobError(Exception):
     """An expected job failure with a stable machine-readable code."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self, code: str, message: str, warnings: list[str] | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.warnings = warnings or []
 
 
 def read_input(path: Path) -> dict[str, Any]:
@@ -71,26 +90,15 @@ def _nullable_number(value: Any) -> float | None:
     return None if math.isnan(number) else number
 
 
-def _model_selected(model_name: str, choice: str) -> bool:
-    if choice == "all":
-        return True
-    normalized = model_name.casefold().replace("_", "").replace("-", "")
-    aliases = {
-        "rf": ("rf", "randomforest"),
-        "extratrees": ("extratrees", "extra trees"),
-        "histgb": ("histgb", "histgradientboosting"),
-    }
-    return any(alias in normalized for alias in aliases.get(choice, ()))
-
-
-def fluorcast_prediction_backend(
-    payload: dict[str, Any],
-) -> tuple[list[dict[str, Any]], list[str], str, str]:
-    """Adapt the existing all-model predictor to the JSON job contract."""
-    if payload["model_choice"] == "graph_model_later":
+def _collect_model(
+    payload: dict[str, Any], model_name: str
+) -> tuple[pd.DataFrame, list[str], str, str]:
+    """Run one model artifact directory and report whether it produced rows."""
+    artifact_dir = MODEL_AVAILABILITY[model_name]["artifact_dir"]
+    if artifact_dir is None:
         raise JobError(
-            "PREDICTION_BACKEND_NOT_CONNECTED",
-            "graph_model_later is reserved for a future graph prediction backend.",
+            "MODEL_UNAVAILABLE",
+            f"The {model_name} model artifact could not be loaded in the current environment.",
         )
 
     args = SimpleNamespace(
@@ -99,9 +107,11 @@ def fluorcast_prediction_backend(
         solvent_smiles=payload["solvent_smiles"],
         solvent_descriptors=PROJECT_ROOT / predict_all_models.DEFAULT_SOLVENT_DESCRIPTORS,
         standardized_combined=PROJECT_ROOT / predict_all_models.DEFAULT_STANDARDIZED_COMBINED,
-        tree_model_dir=PROJECT_ROOT / predict_all_models.DEFAULT_TREE_MODEL_DIR,
-        neural_model_dir=PROJECT_ROOT / predict_all_models.DEFAULT_NEURAL_MODEL_DIR,
-        graph_model_dirs=[PROJECT_ROOT / predict_all_models.DEFAULT_GRAPH_MODEL_DIR],
+        tree_model_dir=(
+            PROJECT_ROOT / predict_all_models.DEFAULT_TREE_MODEL_DIR / str(artifact_dir)
+        ),
+        neural_model_dir=PROJECT_ROOT / "models" / "__json_runner_disabled_neural__",
+        graph_model_dirs=[],
         known_emission_nm=None,
         known_quantum_yield=None,
         applicability_threshold=predict_all_models.DEFAULT_APPLICABILITY_THRESHOLD,
@@ -109,17 +119,71 @@ def fluorcast_prediction_backend(
     table, warnings, canonical_molecule, canonical_solvent, _ = (
         predict_all_models.collect_predictions(args)
     )
-    selected = table.loc[
-        table["model"].astype(str).map(
-            lambda name: _model_selected(name, str(payload["model_choice"]))
-        )
-    ]
-    if selected.empty:
+    return table, warnings, canonical_molecule, str(canonical_solvent)
+
+
+def _unavailable_message(model_name: str) -> str:
+    return (
+        f"Skipped model {model_name}: its artifact could not be loaded in the "
+        "current environment. This model is currently unavailable."
+    )
+
+
+def fluorcast_prediction_backend(
+    payload: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str], str, str]:
+    """Adapt available FluorCast model artifacts to the JSON job contract."""
+    choice = str(payload["model_choice"])
+    requested_models = (
+        ["rf", "extratrees", "gbdt", "histgb", "graph_model_later"]
+        if choice == "all"
+        else [choice]
+    )
+    tables = []
+    warnings: list[str] = []
+    canonical_molecule: str | None = None
+    canonical_solvent: str | None = None
+
+    for model_name in requested_models:
+        try:
+            table, model_warnings, molecule, solvent = _collect_model(
+                payload, model_name
+            )
+        except JobError as exc:
+            if choice != "all":
+                raise
+            warnings.append(_unavailable_message(model_name))
+            continue
+        canonical_molecule = molecule
+        canonical_solvent = solvent
+        if table.empty:
+            unavailable_warning = _unavailable_message(model_name)
+            if choice != "all":
+                raise JobError(
+                    "MODEL_UNAVAILABLE",
+                    f"The {model_name} model artifact could not be loaded in the current environment.",
+                    warnings=model_warnings,
+                )
+            warnings.extend(model_warnings)
+            warnings.append(unavailable_warning)
+            continue
+        tables.append(table)
+        warnings.extend(model_warnings)
+
+    if not tables:
+        if choice != "all":
+            raise JobError(
+                "MODEL_UNAVAILABLE",
+                f"The {choice} model artifact could not be loaded in the current environment.",
+                warnings=warnings,
+            )
         raise JobError(
             "PREDICTION_BACKEND_NOT_CONNECTED",
-            f"No available model artifacts matched model_choice={payload['model_choice']!r}.",
+            "No available model artifacts produced predictions.",
+            warnings=warnings,
         )
 
+    selected = pd.concat(tables, ignore_index=True)
     predictions = []
     for row in selected.to_dict(orient="records"):
         predictions.append(
@@ -139,7 +203,8 @@ def fluorcast_prediction_backend(
                 "warnings": [],
             }
         )
-    return predictions, warnings, canonical_molecule, str(canonical_solvent)
+    assert canonical_molecule is not None and canonical_solvent is not None
+    return predictions, warnings, canonical_molecule, canonical_solvent
 
 
 def write_output(path: Path, payload: dict[str, Any]) -> None:
@@ -176,7 +241,7 @@ def run_job(
             "error_code": getattr(exc, "code", "PREDICTION_JOB_FAILED"),
             "error_message": str(exc),
             "traceback": traceback_module.format_exc(),
-            "warnings": [],
+            "warnings": getattr(exc, "warnings", []),
         }
         exit_code = 1
     write_output(output_path, result)

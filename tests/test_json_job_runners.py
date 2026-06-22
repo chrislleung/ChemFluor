@@ -145,3 +145,88 @@ def test_prediction_success_contract_with_injected_backend(tmp_path: Path) -> No
     assert result["status"] == "success"
     assert result["predictions"] == [{"model_name": "test"}]
     assert result["warnings"] == ["test warning"]
+
+
+def prediction_table(model_name: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "model": model_name,
+                "predicted_emission_nm": 500.0,
+                "predicted_quantum_yield": 0.3,
+                "nearest_training_similarity": 0.75,
+                "nearest_training_smiles": "CCO",
+            }
+        ]
+    )
+
+
+def install_model_availability_fixture(monkeypatch: Any) -> None:
+    def collect(_: dict[str, Any], model_name: str) -> Any:
+        if model_name in {"rf", "extratrees"}:
+            return prediction_table(model_name), [], "CCO", "O"
+        if model_name == "graph_model_later":
+            raise prediction_runner.JobError("MODEL_UNAVAILABLE", "Graph unavailable")
+        return (
+            prediction_table(model_name).iloc[0:0],
+            [f"Failed to predict with {model_name}; skipping: No module named '_loss'"],
+            "CCO",
+            "O",
+        )
+
+    monkeypatch.setattr(prediction_runner, "_collect_model", collect)
+
+
+def test_model_choice_all_skips_unavailable_experimental_models(
+    monkeypatch: Any,
+) -> None:
+    install_model_availability_fixture(monkeypatch)
+    payload = prediction_input()
+
+    predictions, warnings, _, _ = prediction_runner.fluorcast_prediction_backend(payload)
+
+    assert [prediction["model_name"] for prediction in predictions] == [
+        "rf",
+        "extratrees",
+    ]
+    assert any("Skipped model gbdt" in warning for warning in warnings)
+    assert any("Skipped model histgb" in warning for warning in warnings)
+    assert any("Skipped model graph_model_later" in warning for warning in warnings)
+
+
+def test_model_choice_rf_returns_only_rf(monkeypatch: Any) -> None:
+    install_model_availability_fixture(monkeypatch)
+    payload = prediction_input()
+    payload["model_choice"] = "rf"
+
+    predictions, _, _, _ = prediction_runner.fluorcast_prediction_backend(payload)
+
+    assert [prediction["model_name"] for prediction in predictions] == ["rf"]
+
+
+def test_model_choice_extratrees_returns_only_extratrees(monkeypatch: Any) -> None:
+    install_model_availability_fixture(monkeypatch)
+    payload = prediction_input()
+    payload["model_choice"] = "extratrees"
+
+    predictions, _, _, _ = prediction_runner.fluorcast_prediction_backend(payload)
+
+    assert [prediction["model_name"] for prediction in predictions] == ["extratrees"]
+
+
+def test_model_choice_histgb_writes_model_unavailable(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    install_model_availability_fixture(monkeypatch)
+    input_path = tmp_path / "input.json"
+    output_path = tmp_path / "output.json"
+    payload = prediction_input()
+    payload["model_choice"] = "histgb"
+    write_json(input_path, payload)
+
+    assert prediction_runner.run_job(input_path, output_path) == 1
+    result = json.loads(output_path.read_text(encoding="utf-8"))
+    assert result["status"] == "failed"
+    assert result["error_code"] == "MODEL_UNAVAILABLE"
+    assert "could not be loaded in the current environment" in result["error_message"]
+    assert any("_loss" in warning for warning in result["warnings"])
