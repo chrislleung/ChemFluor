@@ -399,9 +399,11 @@ def run_worker_loop(
     collect: bool = True,
     interval_seconds: float = 30,
     max_loops: int | None = None,
+    exit_after_idle_seconds: float | None = None,
     sleep_fn: Any = time.sleep,
 ) -> None:
     loop_number = 0
+    idle_seconds = 0.0
     while max_loops is None or loop_number < max_loops:
         loop_number += 1
         log(f"Worker loop {loop_number} starting.")
@@ -417,11 +419,25 @@ def run_worker_loop(
                 f"Worker loop {loop_number} finished: outputs collected={collected}; "
                 f"queued jobs submitted={submitted}."
             )
+            if collected or submitted:
+                idle_seconds = 0.0
+            else:
+                idle_seconds += (
+                    interval_seconds if interval_seconds > 0 else exit_after_idle_seconds or 0
+                )
+                if exit_after_idle_seconds is not None:
+                    log(
+                        f"Worker loop {loop_number} idle for {idle_seconds} "
+                        f"of {exit_after_idle_seconds} second(s)."
+                    )
         except Exception as exc:
             log(f"Worker loop {loop_number} failed: {exc}")
             traceback.print_exc()
         if max_loops is not None and loop_number >= max_loops:
             log(f"Worker loop reached max loops ({max_loops}); exiting.")
+            break
+        if exit_after_idle_seconds is not None and idle_seconds >= exit_after_idle_seconds:
+            log(f"Worker loop idle exit reached after {idle_seconds} second(s); exiting.")
             break
         log(f"Worker loop {loop_number} sleeping for {interval_seconds} second(s).")
         sleep_fn(interval_seconds)
@@ -433,6 +449,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--loop", action="store_true", help="Continuously collect outputs and submit queued jobs.")
     parser.add_argument("--interval-seconds", type=float, default=30, help="Sleep interval between loop passes.")
     parser.add_argument("--max-loops", type=int, help="Optional loop count limit for testing.")
+    parser.add_argument("--exit-after-idle-seconds", type=float, help="Exit loop after this many seconds with no collected outputs or submitted jobs.")
     parser.add_argument("--submit-only", action="store_true", help="Only submit queued jobs.")
     parser.add_argument("--collect-only", action="store_true", help="Only collect completed outputs.")
     parser.add_argument("--dry-run", action="store_true", help="Log planned work without writing or updating.")
@@ -450,6 +467,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.max_loops is not None and args.max_loops < 1:
         print("--max-loops must be at least 1.", file=sys.stderr)
         return 2
+    if args.exit_after_idle_seconds is not None and args.exit_after_idle_seconds < 0:
+        print("--exit-after-idle-seconds must be non-negative.", file=sys.stderr)
+        return 2
     try:
         config = read_config()
         client = SupabaseRestClient(config.supabase_url, config.service_role_key)
@@ -464,6 +484,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 collect=collect,
                 interval_seconds=args.interval_seconds,
                 max_loops=args.max_loops,
+                exit_after_idle_seconds=args.exit_after_idle_seconds,
             )
         else:
             run_worker_pass(

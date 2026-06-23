@@ -100,7 +100,7 @@ def test_prediction_output_converts_to_prediction_results_rows() -> None:
 
     assert rows == [
         {
-            "prediction_job_id": "job-123",
+            "job_id": "job-123",
             "model_name": "rf",
             "predicted_emission_nm": 512.3,
             "predicted_quantum_yield": 0.41,
@@ -172,3 +172,30 @@ def test_worker_loop_logs_errors_and_continues(monkeypatch: pytest.MonkeyPatch) 
 
     assert calls == ["pass", "pass"]
     assert sleeps == [0.25]
+
+
+def test_worker_loop_exits_after_idle_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    sleeps = []
+
+    def idle_pass(*_: Any, **__: Any) -> tuple[int, int]:
+        calls.append("pass")
+        return 0, 0
+
+    monkeypatch.setattr(worker, "run_worker_pass", idle_pass)
+
+    worker.run_worker_loop(
+        object(),
+        worker.WorkerConfig(
+            supabase_url="https://example.supabase.co",
+            service_role_key="fake",
+            fluorcast_repo=Path("/repo"),
+            jobs_dir=Path("/jobs"),
+        ),
+        interval_seconds=30,
+        exit_after_idle_seconds=60,
+        sleep_fn=sleeps.append,
+    )
+
+    assert calls == ["pass", "pass"]
+    assert sleeps == [30]

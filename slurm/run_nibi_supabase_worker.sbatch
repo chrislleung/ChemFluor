@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=fluorcast-worker
+#SBATCH --job-name=fluorcast-work
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --error=slurm-%x-%j.err
 #SBATCH --time=24:00:00
@@ -45,4 +45,7 @@ else
     echo "No .venv found; using python from PATH. Set FLUORCAST_ACTIVATE to customize activation." >&2
 fi
 
-python scripts/nibi_supabase_worker.py --loop
+python scripts/nibi_supabase_worker.py \
+    --loop \
+    --interval-seconds 30 \
+    --exit-after-idle-seconds 900

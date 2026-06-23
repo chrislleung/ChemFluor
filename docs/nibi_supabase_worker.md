@@ -64,7 +64,7 @@ to `FLUORCAST_POLL_LIMIT`.
 
 For successful outputs, the worker inserts rows into `prediction_results` with:
 
-- `prediction_job_id`
+- `job_id`
 - `model_name`
 - `predicted_emission_nm`
 - `predicted_quantum_yield`
@@ -121,6 +121,7 @@ The default sleep interval is 30 seconds. Override it for testing or operations:
 ```bash
 python scripts/nibi_supabase_worker.py --loop --interval-seconds 60
 python scripts/nibi_supabase_worker.py --loop --interval-seconds 5 --max-loops 3
+python scripts/nibi_supabase_worker.py --loop --interval-seconds 30 --exit-after-idle-seconds 900
 ```
 
 Useful manual modes:
@@ -136,7 +137,7 @@ inserting results, or updating Supabase rows.
 ## Run From Slurm
 
 The Slurm wrapper sources `/home/chrisl/scratch/fluorcast_worker.env` and runs
-the worker in loop mode:
+the worker in loop mode with a 30-second interval and a 15-minute idle exit:
 
 ```bash
 sbatch slurm/run_nibi_supabase_worker.sbatch
@@ -156,12 +157,71 @@ different environment, set:
 export FLUORCAST_ACTIVATE=/path/to/venv/bin/activate
 ```
 
+## Demo Worker
+
+For demos, it can be useful to run a worker that stays alive for the full Slurm
+allocation. Start a 24-hour manual worker with an explicit Slurm wrap command:
+
+```bash
+sbatch \
+  --job-name=fluorcast-work \
+  --time=24:00:00 \
+  --cpus-per-task=1 \
+  --mem=2G \
+  --wrap='cd /home/chrisl/scratch/ChemFluor_Project && set -a && source /home/chrisl/scratch/fluorcast_worker.env && set +a && python scripts/nibi_supabase_worker.py --loop --interval-seconds 30'
+```
+
+Use this only when an always-on demo is worth the idle allocation. Normal
+low-traffic operation should use the scheduled launcher below.
+
+## Scheduled Launcher
+
+For normal low-traffic use, run the launcher from cron. It starts a short worker
+only when one is not already queued or running:
+
+```bash
+bash /home/chrisl/scratch/ChemFluor_Project/scripts/submit_nibi_worker_if_needed.sh
+```
+
+The launcher:
+
+- uses `FLUORCAST_REPO` when set, otherwise
+  `/home/chrisl/scratch/ChemFluor_Project`
+- sources `/home/chrisl/scratch/fluorcast_worker.env`
+- checks for an existing Slurm job named `fluorcast-work`
+- exits without submitting when one is already queued or running
+- submits `slurm/run_nibi_supabase_worker.sbatch` when no worker exists
+
+Example crontab entry for every 10 minutes:
+
+```cron
+*/10 * * * * /usr/bin/env bash /home/chrisl/scratch/ChemFluor_Project/scripts/submit_nibi_worker_if_needed.sh >> /home/chrisl/scratch/fluorcast_worker_launcher.log 2>&1
+```
+
+With this schedule, new portal jobs may wait up to the cron interval before a
+worker starts. Once started, the worker polls every 30 seconds and exits after
+15 idle minutes.
+
+## Check Worker Status
+
+Check whether a worker is queued or running:
+
+```bash
+squeue -u "$USER" -n fluorcast-work
+```
+
+Review launcher logs:
+
+```bash
+tail -n 100 /home/chrisl/scratch/fluorcast_worker_launcher.log
+```
+
 ## Stop The Worker
 
 Find the Slurm job:
 
 ```bash
-squeue -u "$USER" -n fluorcast-worker
+squeue -u "$USER" -n fluorcast-work
 ```
 
 Cancel it:
