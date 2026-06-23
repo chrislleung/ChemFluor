@@ -189,7 +189,6 @@ def fluorcast_prediction_backend(
         predictions.append(
             {
                 "model_name": str(row["model"]),
-                "predicted_absorption_nm": None,
                 "predicted_emission_nm": _nullable_number(
                     row.get("predicted_emission_nm")
                 ),

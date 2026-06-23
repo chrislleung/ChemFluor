@@ -112,8 +112,10 @@ def test_duplicate_checker_finds_canonical_exact_pair(tmp_path: Path) -> None:
             "record_id": ["record-7", "record-8"],
             "molecule_smiles": ["CCO", "c1ccccc1"],
             "solvent_smiles": ["[OH2]", "CCO"],
+            "absorption_nm": [350.0, 390.0],
             "emission_nm": [510.0, 420.0],
             "quantum_yield": [0.25, None],
+            "lifetime_ns": [3.2, None],
             "source_doi": ["10.1234/example", None],
         }
     ).to_csv(dataset, index=False)
@@ -130,6 +132,10 @@ def test_duplicate_checker_finds_canonical_exact_pair(tmp_path: Path) -> None:
     assert result["canonical_solvent_smiles"] == "O"
     assert result["nearest_matches"][0]["record_id"] == "record-7"
     assert result["nearest_matches"][0]["similarity"] == 1.0
+    assert "emission_nm" in result["nearest_matches"][0]
+    assert "quantum_yield" in result["nearest_matches"][0]
+    assert "absorption_nm" not in result["nearest_matches"][0]
+    assert "lifetime_ns" not in result["nearest_matches"][0]
 
 
 def test_prediction_success_contract_with_injected_backend(tmp_path: Path) -> None:
@@ -152,6 +158,7 @@ def prediction_table(model_name: str) -> pd.DataFrame:
         [
             {
                 "model": model_name,
+                "predicted_absorption_nm": 350.0,
                 "predicted_emission_nm": 500.0,
                 "predicted_quantum_yield": 0.3,
                 "nearest_training_similarity": 0.75,
@@ -189,6 +196,10 @@ def test_model_choice_all_skips_unavailable_experimental_models(
         "rf",
         "extratrees",
     ]
+    for prediction in predictions:
+        assert "predicted_absorption_nm" not in prediction
+        assert prediction["predicted_emission_nm"] == 500.0
+        assert prediction["predicted_quantum_yield"] == 0.3
     assert any("Skipped model gbdt" in warning for warning in warnings)
     assert any("Skipped model histgb" in warning for warning in warnings)
     assert any("Skipped model graph_model_later" in warning for warning in warnings)

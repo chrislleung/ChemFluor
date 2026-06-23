@@ -4,6 +4,10 @@ The JSON files are the job contract between FluorCast and the future portal.
 Each command reads one input JSON and writes one success or failure JSON. These
 scripts do not connect to Supabase or any other network service.
 
+FluorCast currently predicts emission wavelength and quantum yield for the
+portal workflow. Historical datasets and internal model code may still contain
+absorption or lifetime fields, but the JSON job outputs do not expose them.
+
 ## Prediction test
 
 Create a job directory and prediction input on NIBI:

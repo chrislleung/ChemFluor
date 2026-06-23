@@ -39,7 +39,6 @@ Successful output:
   "predictions": [
     {
       "model_name": "rf",
-      "predicted_absorption_nm": null,
       "predicted_emission_nm": 450.0,
       "predicted_quantum_yield": 0.2,
       "nearest_training_similarity": 0.8,
@@ -53,8 +52,10 @@ Successful output:
 
 The runner adapts `scripts/predict_all_models.py`. It never invents values: if
 no requested model artifacts produce a prediction, the job fails with
-`PREDICTION_BACKEND_NOT_CONNECTED`. The existing models do not currently emit
-absorption predictions, so that property is `null`.
+`PREDICTION_BACKEND_NOT_CONNECTED`. The portal prediction contract currently
+reports emission wavelength and quantum yield. If internal model code or
+historical datasets include absorption or lifetime values, the JSON runner
+does not include them in prediction output.
 
 For `model_choice: "all"`, each model artifact is checked independently. Models
 that cannot be loaded, including artifacts created by an incompatible
@@ -92,6 +93,32 @@ ID, canonical molecule and solvent SMILES, and up to `max-matches` nearest
 records. Each nearest record contains its molecule/solvent SMILES, Morgan
 Tanimoto similarity, optional emission and quantum-yield values, and an
 optional DOI.
+
+```json
+{
+  "status": "success",
+  "submission_id": "submission-123",
+  "exact_duplicate_found": false,
+  "exact_duplicate_record_id": null,
+  "canonical_molecule_smiles": "c1ccccc1",
+  "canonical_solvent_smiles": "CCO",
+  "nearest_matches": [
+    {
+      "record_id": "record-123",
+      "molecule_smiles": "c1ccccc1",
+      "solvent_smiles": "CCO",
+      "similarity": 1.0,
+      "emission_nm": 450.0,
+      "quantum_yield": 0.2,
+      "source_doi": "10.1234/example"
+    }
+  ],
+  "warnings": []
+}
+```
+
+Duplicate-check output does not include absorption or lifetime fields, even
+when those historical columns are present in the source dataset.
 
 ## Failure output
 
