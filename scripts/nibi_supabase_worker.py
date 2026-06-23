@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -257,37 +258,42 @@ def submit_queued_jobs(
     submitted = 0
     for job in jobs:
         job_id = str(job["id"])
-        job_dir = prediction_job_dir(config.jobs_dir, job_id)
-        input_path = job_dir / "input.json"
-        output_path = job_dir / "output.json"
-        payload = create_prediction_input_payload(job)
-        if dry_run:
-            log(f"Dry run: would write prediction input for job {job_id} to {input_path}")
-            log(f"Dry run: would update job {job_id} to running and submit sbatch")
+        try:
+            job_dir = prediction_job_dir(config.jobs_dir, job_id)
+            input_path = job_dir / "input.json"
+            output_path = job_dir / "output.json"
+            payload = create_prediction_input_payload(job)
+            if dry_run:
+                log(f"Dry run: would write prediction input for job {job_id} to {input_path}")
+                log(f"Dry run: would update job {job_id} to running and submit sbatch")
+                continue
+            job_dir.mkdir(parents=True, exist_ok=True)
+            input_path.write_text(
+                json.dumps(payload, indent=2, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )
+            log(f"Input path written for job {job_id}: {input_path}")
+            update_prediction_job(client, job_id, {"status": "running"})
+            log(f"Supabase job {job_id} updated to running.")
+            slurm_job_id = submit_prediction_job(config, input_path, output_path)
+            update_values: dict[str, Any] = {"status": "running"}
+            if slurm_job_id is not None:
+                update_values["slurm_job_id"] = slurm_job_id
+            update_prediction_job(
+                client,
+                job_id,
+                update_values,
+                optional_fields={"slurm_job_id"},
+            )
+            if slurm_job_id is None:
+                log(f"Submitted job {job_id}; no Slurm job id was detected.")
+            else:
+                log(f"Submitted job {job_id} as Slurm job {slurm_job_id}.")
+            submitted += 1
+        except Exception as exc:
+            log(f"Error submitting job {job_id}: {exc}")
+            traceback.print_exc()
             continue
-        job_dir.mkdir(parents=True, exist_ok=True)
-        input_path.write_text(
-            json.dumps(payload, indent=2, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
-        log(f"Input path written for job {job_id}: {input_path}")
-        update_prediction_job(client, job_id, {"status": "running"})
-        log(f"Supabase job {job_id} updated to running.")
-        slurm_job_id = submit_prediction_job(config, input_path, output_path)
-        update_values: dict[str, Any] = {"status": "running"}
-        if slurm_job_id is not None:
-            update_values["slurm_job_id"] = slurm_job_id
-        update_prediction_job(
-            client,
-            job_id,
-            update_values,
-            optional_fields={"slurm_job_id"},
-        )
-        if slurm_job_id is None:
-            log(f"Submitted job {job_id}; no Slurm job id was detected.")
-        else:
-            log(f"Submitted job {job_id} as Slurm job {slurm_job_id}.")
-        submitted += 1
     return submitted
 
 
@@ -331,43 +337,102 @@ def collect_completed_jobs(
     output_paths = iter_prediction_outputs(config.jobs_dir)
     log(f"Prediction output files found: {len(output_paths)}")
     for output_path in output_paths:
-        output = read_prediction_output(output_path)
-        job_id = str(output.get("job_id") or output_path.parent.name.removeprefix("prediction_"))
-        current_status = get_prediction_job_status(client, job_id)
-        if current_status == "completed":
-            log(f"Skipping job {job_id}; Supabase status is already completed.")
-            continue
-        if dry_run:
-            log(f"Dry run: would collect output for job {job_id}: {output_path}")
-            continue
-        if output["status"] == "success":
-            rows = prediction_results_rows(output)
-            if prediction_results_exist(client, job_id):
-                log(f"Prediction results already exist for job {job_id}; not inserting duplicates.")
-            elif rows:
-                client.insert("prediction_results", rows)
-                log(f"Inserted {len(rows)} prediction_results row(s) for job {job_id}.")
+        try:
+            output = read_prediction_output(output_path)
+            job_id = str(output.get("job_id") or output_path.parent.name.removeprefix("prediction_"))
+            current_status = get_prediction_job_status(client, job_id)
+            if current_status == "completed":
+                log(f"Skipping job {job_id}; Supabase status is already completed.")
+                continue
+            if dry_run:
+                log(f"Dry run: would collect output for job {job_id}: {output_path}")
+                continue
+            if output["status"] == "success":
+                rows = prediction_results_rows(output)
+                if prediction_results_exist(client, job_id):
+                    log(f"Prediction results already exist for job {job_id}; not inserting duplicates.")
+                elif rows:
+                    client.insert("prediction_results", rows)
+                    log(f"Inserted {len(rows)} prediction_results row(s) for job {job_id}.")
+                else:
+                    log(f"Job {job_id} succeeded with no prediction rows.")
+                update_prediction_job(client, job_id, {"status": "completed"})
+                log(f"Supabase job {job_id} updated to completed.")
             else:
-                log(f"Job {job_id} succeeded with no prediction rows.")
-            update_prediction_job(client, job_id, {"status": "completed"})
-            log(f"Supabase job {job_id} updated to completed.")
-        else:
-            error_message = output.get("error_message") or "Prediction job failed."
-            update_prediction_job(
-                client,
-                job_id,
-                {"status": "failed", "error_message": error_message},
-                optional_fields={"error_message"},
-            )
-            log(f"Supabase job {job_id} updated to failed.")
-        log(f"Output collected for job {job_id}: {output_path}")
-        collected += 1
+                error_message = output.get("error_message") or "Prediction job failed."
+                update_prediction_job(
+                    client,
+                    job_id,
+                    {"status": "failed", "error_message": error_message},
+                    optional_fields={"error_message"},
+                )
+                log(f"Supabase job {job_id} updated to failed.")
+            log(f"Output collected for job {job_id}: {output_path}")
+            collected += 1
+        except Exception as exc:
+            log(f"Error collecting output {output_path}: {exc}")
+            traceback.print_exc()
+            continue
     return collected
+
+
+def run_worker_pass(
+    client: SupabaseRestClient,
+    config: WorkerConfig,
+    *,
+    dry_run: bool = False,
+    submit: bool = True,
+    collect: bool = True,
+) -> tuple[int, int]:
+    collected = collect_completed_jobs(client, config, dry_run=dry_run) if collect else 0
+    submitted = submit_queued_jobs(client, config, dry_run=dry_run) if submit else 0
+    log(f"Worker pass summary: outputs collected={collected}; queued jobs submitted={submitted}.")
+    return collected, submitted
+
+
+def run_worker_loop(
+    client: SupabaseRestClient,
+    config: WorkerConfig,
+    *,
+    dry_run: bool = False,
+    submit: bool = True,
+    collect: bool = True,
+    interval_seconds: float = 30,
+    max_loops: int | None = None,
+    sleep_fn: Any = time.sleep,
+) -> None:
+    loop_number = 0
+    while max_loops is None or loop_number < max_loops:
+        loop_number += 1
+        log(f"Worker loop {loop_number} starting.")
+        try:
+            collected, submitted = run_worker_pass(
+                client,
+                config,
+                dry_run=dry_run,
+                submit=submit,
+                collect=collect,
+            )
+            log(
+                f"Worker loop {loop_number} finished: outputs collected={collected}; "
+                f"queued jobs submitted={submitted}."
+            )
+        except Exception as exc:
+            log(f"Worker loop {loop_number} failed: {exc}")
+            traceback.print_exc()
+        if max_loops is not None and loop_number >= max_loops:
+            log(f"Worker loop reached max loops ({max_loops}); exiting.")
+            break
+        log(f"Worker loop {loop_number} sleeping for {interval_seconds} second(s).")
+        sleep_fn(interval_seconds)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--once", action="store_true", help="Run one submit and collect pass.")
+    parser.add_argument("--loop", action="store_true", help="Continuously collect outputs and submit queued jobs.")
+    parser.add_argument("--interval-seconds", type=float, default=30, help="Sleep interval between loop passes.")
+    parser.add_argument("--max-loops", type=int, help="Optional loop count limit for testing.")
     parser.add_argument("--submit-only", action="store_true", help="Only submit queued jobs.")
     parser.add_argument("--collect-only", action="store_true", help="Only collect completed outputs.")
     parser.add_argument("--dry-run", action="store_true", help="Log planned work without writing or updating.")
@@ -379,13 +444,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.submit_only and args.collect_only:
         print("--submit-only and --collect-only cannot be used together.", file=sys.stderr)
         return 2
+    if args.interval_seconds < 0:
+        print("--interval-seconds must be non-negative.", file=sys.stderr)
+        return 2
+    if args.max_loops is not None and args.max_loops < 1:
+        print("--max-loops must be at least 1.", file=sys.stderr)
+        return 2
     try:
         config = read_config()
         client = SupabaseRestClient(config.supabase_url, config.service_role_key)
-        if not args.collect_only:
-            submit_queued_jobs(client, config, dry_run=args.dry_run)
-        if not args.submit_only:
-            collect_completed_jobs(client, config, dry_run=args.dry_run)
+        submit = not args.collect_only
+        collect = not args.submit_only
+        if args.loop:
+            run_worker_loop(
+                client,
+                config,
+                dry_run=args.dry_run,
+                submit=submit,
+                collect=collect,
+                interval_seconds=args.interval_seconds,
+                max_loops=args.max_loops,
+            )
+        else:
+            run_worker_pass(
+                client,
+                config,
+                dry_run=args.dry_run,
+                submit=submit,
+                collect=collect,
+            )
     except Exception as exc:
         log(f"Worker failed: {exc}")
         traceback.print_exc()

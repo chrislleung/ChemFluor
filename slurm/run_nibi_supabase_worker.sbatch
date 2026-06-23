@@ -2,11 +2,22 @@
 #SBATCH --job-name=fluorcast-worker
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --error=slurm-%x-%j.err
-#SBATCH --time=00:10:00
+#SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=2G
 
 set -euo pipefail
+
+FLUORCAST_WORKER_ENV="${FLUORCAST_WORKER_ENV:-/home/chrisl/scratch/fluorcast_worker.env}"
+if [[ ! -f "$FLUORCAST_WORKER_ENV" ]]; then
+    echo "Worker environment file does not exist: $FLUORCAST_WORKER_ENV" >&2
+    exit 2
+fi
+
+set -a
+# shellcheck disable=SC1090
+source "$FLUORCAST_WORKER_ENV"
+set +a
 
 : "${FLUORCAST_REPO:?FLUORCAST_REPO must point to the FluorCast repository}"
 : "${FLUORCAST_JOBS_DIR:?FLUORCAST_JOBS_DIR must point to the jobs directory}"
@@ -34,4 +45,4 @@ else
     echo "No .venv found; using python from PATH. Set FLUORCAST_ACTIVATE to customize activation." >&2
 fi
 
-python scripts/nibi_supabase_worker.py --once
+python scripts/nibi_supabase_worker.py --loop

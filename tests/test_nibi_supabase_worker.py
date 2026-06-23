@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -113,3 +115,60 @@ def test_prediction_output_converts_to_prediction_results_rows() -> None:
 def test_capture_slurm_job_id() -> None:
     assert worker.capture_slurm_job_id("Submitted batch job 123456\n") == "123456"
     assert worker.capture_slurm_job_id("no id here") is None
+
+
+def test_worker_pass_collects_before_submitting(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def collect(*_: Any, **__: Any) -> int:
+        calls.append("collect")
+        return 2
+
+    def submit(*_: Any, **__: Any) -> int:
+        calls.append("submit")
+        return 1
+
+    monkeypatch.setattr(worker, "collect_completed_jobs", collect)
+    monkeypatch.setattr(worker, "submit_queued_jobs", submit)
+
+    result = worker.run_worker_pass(
+        object(),
+        worker.WorkerConfig(
+            supabase_url="https://example.supabase.co",
+            service_role_key="fake",
+            fluorcast_repo=Path("/repo"),
+            jobs_dir=Path("/jobs"),
+        ),
+    )
+
+    assert calls == ["collect", "submit"]
+    assert result == (2, 1)
+
+
+def test_worker_loop_logs_errors_and_continues(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    sleeps = []
+
+    def pass_once(*_: Any, **__: Any) -> tuple[int, int]:
+        calls.append("pass")
+        if len(calls) == 1:
+            raise RuntimeError("temporary failure")
+        return 3, 4
+
+    monkeypatch.setattr(worker, "run_worker_pass", pass_once)
+
+    worker.run_worker_loop(
+        object(),
+        worker.WorkerConfig(
+            supabase_url="https://example.supabase.co",
+            service_role_key="fake",
+            fluorcast_repo=Path("/repo"),
+            jobs_dir=Path("/jobs"),
+        ),
+        interval_seconds=0.25,
+        max_loops=2,
+        sleep_fn=sleeps.append,
+    )
+
+    assert calls == ["pass", "pass"]
+    assert sleeps == [0.25]
