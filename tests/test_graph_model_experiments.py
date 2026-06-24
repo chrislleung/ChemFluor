@@ -134,6 +134,40 @@ def tiny_rows() -> pd.DataFrame:
     )
 
 
+def test_prepare_target_data_copies_read_only_descriptor_array(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = tiny_rows()
+    original_to_numpy = pd.DataFrame.to_numpy
+
+    def read_only_to_numpy(frame, *args, **kwargs):
+        values = np.array(
+            original_to_numpy(frame, *args, **kwargs),
+            copy=True,
+        )
+        values.setflags(write=False)
+        return values
+
+    monkeypatch.setattr(pd.DataFrame, "to_numpy", read_only_to_numpy)
+    args = type(
+        "Args",
+        (),
+        {"test_size": 0.2, "val_size": 0.1, "seed": 123},
+    )()
+
+    data = graph_script.prepare_target_data(
+        "emission_nm",
+        rows,
+        ["dielectric_constant"],
+        args,
+    )
+
+    assert data is not None
+    assert len(data.train_index) > 0
+    assert len(data.test_index) > 0
+    assert all(sample.solvent.flags.writeable for sample in data.samples)
+
+
 def test_output_comparison_files_created_without_old_comparisons(tmp_path: Path) -> None:
     graph_comparison = pd.DataFrame(
         [

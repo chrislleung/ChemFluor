@@ -236,7 +236,16 @@ def prepare_target_data(
     )
     descriptor_values = target_rows[descriptor_columns].apply(pd.to_numeric, errors="coerce")
     medians = descriptor_values.iloc[train_index].median(numeric_only=True)
-    solvent_matrix = descriptor_values.fillna(medians).fillna(0.0).to_numpy(dtype=np.float32)
+    # pandas copy-on-write may expose a read-only NumPy view (notably in
+    # pandas 3.x). This matrix is updated in place with split-specific scaling,
+    # so force an owned, writable array before assigning transformed values.
+    solvent_matrix = np.array(
+        descriptor_values.fillna(medians).fillna(0.0).to_numpy(
+            dtype=np.float32
+        ),
+        dtype=np.float32,
+        copy=True,
+    )
     solvent_scaler = StandardScaler()
     solvent_matrix[train_index] = solvent_scaler.fit_transform(solvent_matrix[train_index])
     if len(val_index):
